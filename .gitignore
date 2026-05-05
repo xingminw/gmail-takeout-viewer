@@ -1,0 +1,31 @@
+# Local configuration
+config.json
+
+# Mail archive data
+messages/
+*.mbox
+*.mbox.gz
+*.eml
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+*.db
+*.db-shm
+*.db-wal
+
+# Generated reports / exports
+reports/
+exports/
+*.csv
+*.jsonl
+
+# Python / OS/editor noise
+__pycache__/
+*.py[cod]
+.Python
+.venv/
+venv/
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
