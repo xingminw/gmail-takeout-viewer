@@ -7,6 +7,8 @@ import socket
 import sqlite3
 import threading
 import webbrowser
+from email import policy
+from email.parser import BytesParser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, quote, unquote, urlparse
@@ -370,6 +372,57 @@ def conversation_detail(conversation_id):
     }
 
 
+def rewrite_inline_cids(rel_path, html_text):
+    match = re.match(r"^messages/(\d+)/body\.html$", rel_path.replace("\\", "/"))
+    if not match:
+        return html_text
+
+    message_id = int(match.group(1))
+    attachments = read_sql(
+        "SELECT filename,path FROM attachments WHERE message_id = ? ORDER BY id",
+        (message_id,),
+    )
+    cid_map = {}
+    filename_map = {}
+    for attachment in attachments:
+        filename = attachment.get("filename") or Path(attachment.get("path") or "").name
+        if not filename:
+            continue
+        local_url = "/file/" + quote(attachment["path"], safe="/")
+        names = {filename.lower(), Path(filename).name.lower(), Path(filename).stem.lower()}
+        for name in names:
+            cid_map.setdefault(name, local_url)
+            filename_map.setdefault(name, local_url)
+
+    raw_path = APP_DIR / "messages" / f"{message_id:06d}" / "raw.eml"
+    if raw_path.exists():
+        try:
+            msg = BytesParser(policy=policy.default).parsebytes(raw_path.read_bytes())
+            for part in msg.walk():
+                content_id = part.get("Content-ID")
+                filename = part.get_filename()
+                if not content_id or not filename:
+                    continue
+                local_url = filename_map.get(filename.lower()) or filename_map.get(Path(filename).name.lower())
+                if local_url:
+                    cid_map.setdefault(content_id.strip("<>").lower(), local_url)
+        except Exception:
+            pass
+
+    if not cid_map:
+        return html_text
+
+    def replace(match):
+        cid = unquote(match.group(1)).strip("<>")
+        keys = [cid.lower(), cid.split("@", 1)[0].lower(), Path(cid.split("@", 1)[0]).stem.lower()]
+        for key in keys:
+            if key in cid_map:
+                return cid_map[key]
+        return match.group(0)
+
+    return re.sub(r"(?i)cid:([^\"'\s>)]+)", replace, html_text)
+
+
 INDEX_HTML = r"""<!doctype html>
 <html lang="zh-CN">
 <head>
@@ -503,9 +556,12 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_error(404)
                 return
             content_type = mimetypes.guess_type(target.name)[0] or "application/octet-stream"
-            data = target.read_bytes()
+            if content_type == "text/html":
+                data = rewrite_inline_cids(rel, target.read_text(encoding="utf-8", errors="replace")).encode("utf-8")
+            else:
+                data = target.read_bytes()
             self.send_response(200)
-            self.send_header("Content-Type", content_type)
+            self.send_header("Content-Type", content_type if content_type != "text/html" else "text/html; charset=utf-8")
             self.send_header("Content-Length", str(len(data)))
             self.end_headers()
             self.wfile.write(data)
