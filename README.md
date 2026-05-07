@@ -55,7 +55,19 @@ On Windows, double-click:
 start.bat
 ```
 
-On macOS or Linux:
+On macOS, double-click:
+
+```text
+start.command
+```
+
+If macOS says the file is not executable, run this once in Terminal from the project folder:
+
+```sh
+chmod +x start.command
+```
+
+On macOS or Linux from Terminal:
 
 ```sh
 sh start.sh
@@ -77,6 +89,7 @@ Tracked source files:
 app.py                 Local web app and browser UI
 import_mbox.py         Imports a Gmail Takeout MBOX into the viewer format
 start.bat              Windows launcher
+start.command          macOS double-click launcher
 start.sh               macOS/Linux launcher
 start.py               Cross-platform Python entrypoint
 config.example.json    Example local account config
