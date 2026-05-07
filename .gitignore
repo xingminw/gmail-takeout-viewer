@@ -18,6 +18,7 @@ reports/
 exports/
 *.csv
 *.jsonl
+test_import_*/
 
 # Python / OS/editor noise
 __pycache__/

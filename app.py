@@ -16,8 +16,9 @@ from urllib.parse import parse_qs, quote, unquote, urlparse
 
 
 APP_DIR = Path(__file__).resolve().parent
-DB_PATH = APP_DIR / "gmail_index.sqlite"
-MESSAGES_DIR = APP_DIR / "messages"
+DATA_DIR = Path(os.environ.get("GMAIL_VIEWER_DATA_DIR", APP_DIR)).resolve()
+DB_PATH = DATA_DIR / "gmail_index.sqlite"
+MESSAGES_DIR = DATA_DIR / "messages"
 HOST = "127.0.0.1"
 CONFIG_PATH = APP_DIR / "config.json"
 
@@ -81,6 +82,27 @@ def ensure_performance_schema():
             CREATE INDEX IF NOT EXISTS idx_message_labels_message_id ON message_labels(message_id);
             CREATE INDEX IF NOT EXISTS idx_attachments_message_id ON attachments(message_id);
             CREATE INDEX IF NOT EXISTS idx_messages_thread_date ON messages(thread_key, date DESC, id DESC);
+            CREATE TABLE IF NOT EXISTS conversation_index (
+              conversation_id TEXT PRIMARY KEY,
+              message_count INTEGER NOT NULL,
+              latest_date TEXT,
+              total_size_bytes INTEGER,
+              latest_message_id INTEGER NOT NULL,
+              attachment_count INTEGER NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_conversation_index_latest_date ON conversation_index(latest_date);
+            CREATE INDEX IF NOT EXISTS idx_conversation_index_size ON conversation_index(total_size_bytes);
+            CREATE TABLE IF NOT EXISTS conversation_labels (
+              label TEXT NOT NULL,
+              conversation_id TEXT NOT NULL,
+              message_count INTEGER NOT NULL,
+              latest_date TEXT,
+              total_size_bytes INTEGER,
+              latest_message_id INTEGER NOT NULL,
+              attachment_count INTEGER NOT NULL,
+              PRIMARY KEY(label, conversation_id)
+            );
+            CREATE INDEX IF NOT EXISTS idx_conversation_labels_label_date ON conversation_labels(label, latest_date);
             """
         )
         indexed = conn.execute("SELECT count(DISTINCT message_id) FROM message_labels").fetchone()[0]
@@ -97,7 +119,88 @@ def ensure_performance_schema():
                 "INSERT OR IGNORE INTO message_labels(label, message_id) VALUES (?, ?)",
                 label_rows,
             )
+        expected_conversations = conn.execute(
+            "SELECT count(DISTINCT COALESCE(NULLIF(thread_key, ''), 'message:' || id)) FROM messages"
+        ).fetchone()[0]
+        indexed_conversations = conn.execute("SELECT count(*) FROM conversation_index").fetchone()[0]
+        expected_label_conversations = conn.execute(
+            """
+            SELECT count(*) FROM (
+              SELECT ml.label, COALESCE(NULLIF(m.thread_key, ''), 'message:' || m.id) AS conversation_id
+              FROM message_labels ml
+              JOIN messages m ON m.id = ml.message_id
+              GROUP BY ml.label, conversation_id
+            )
+            """
+        ).fetchone()[0]
+        indexed_label_conversations = conn.execute("SELECT count(*) FROM conversation_labels").fetchone()[0]
+        if indexed_conversations != expected_conversations or indexed_label_conversations != expected_label_conversations:
+            rebuild_conversation_indexes(conn)
         conn.execute("PRAGMA optimize")
+
+
+def rebuild_conversation_indexes(conn):
+    conn.executescript(
+        """
+        DELETE FROM conversation_index;
+        DELETE FROM conversation_labels;
+
+        INSERT INTO conversation_index
+        (conversation_id,message_count,latest_date,total_size_bytes,latest_message_id,attachment_count)
+        WITH message_conversations AS (
+          SELECT m.id, m.date, m.size_bytes,
+                 COALESCE(NULLIF(m.thread_key, ''), 'message:' || m.id) AS conversation_id
+          FROM messages m
+        ),
+        ranked AS (
+          SELECT mc.*,
+                 count(*) OVER (PARTITION BY conversation_id) AS message_count,
+                 max(date) OVER (PARTITION BY conversation_id) AS latest_date,
+                 sum(size_bytes) OVER (PARTITION BY conversation_id) AS total_size_bytes,
+                 row_number() OVER (PARTITION BY conversation_id ORDER BY date DESC, id DESC) AS rn
+          FROM message_conversations mc
+        ),
+        attachment_counts AS (
+          SELECT mc.conversation_id, count(a.id) AS attachment_count
+          FROM message_conversations mc
+          LEFT JOIN attachments a ON a.message_id = mc.id
+          GROUP BY mc.conversation_id
+        )
+        SELECT r.conversation_id, r.message_count, r.latest_date, r.total_size_bytes, r.id,
+               COALESCE(ac.attachment_count, 0)
+        FROM ranked r
+        LEFT JOIN attachment_counts ac ON ac.conversation_id = r.conversation_id
+        WHERE r.rn = 1;
+
+        INSERT INTO conversation_labels
+        (label,conversation_id,message_count,latest_date,total_size_bytes,latest_message_id,attachment_count)
+        WITH labeled AS (
+          SELECT ml.label, m.id, m.date, m.size_bytes,
+                 COALESCE(NULLIF(m.thread_key, ''), 'message:' || m.id) AS conversation_id
+          FROM message_labels ml
+          JOIN messages m ON m.id = ml.message_id
+        ),
+        ranked AS (
+          SELECT l.*,
+                 count(*) OVER (PARTITION BY label, conversation_id) AS message_count,
+                 max(date) OVER (PARTITION BY label, conversation_id) AS latest_date,
+                 sum(size_bytes) OVER (PARTITION BY label, conversation_id) AS total_size_bytes,
+                 row_number() OVER (PARTITION BY label, conversation_id ORDER BY date DESC, id DESC) AS rn
+          FROM labeled l
+        ),
+        attachment_counts AS (
+          SELECT l.label, l.conversation_id, count(a.id) AS attachment_count
+          FROM labeled l
+          LEFT JOIN attachments a ON a.message_id = l.id
+          GROUP BY l.label, l.conversation_id
+        )
+        SELECT r.label, r.conversation_id, r.message_count, r.latest_date, r.total_size_bytes, r.id,
+               COALESCE(ac.attachment_count, 0)
+        FROM ranked r
+        LEFT JOIN attachment_counts ac ON ac.label = r.label AND ac.conversation_id = r.conversation_id
+        WHERE r.rn = 1;
+        """
+    )
 
 
 
@@ -293,7 +396,77 @@ def list_messages(params):
     return {"rows": rows, "page": page, "page_size": page_size, "total": total}
 
 
+def fast_conversation_filter(params):
+    blocking = ("q", "year", "domain", "user", "date_from", "date_to")
+    if any(params.get(key, [""])[0].strip() for key in blocking):
+        return None
+
+    clauses = []
+    values = []
+    label = params.get("label", [""])[0].strip()
+    mailbox = params.get("mailbox", [""])[0].strip()
+    mailbox_labels = {
+        "inbox": "Inbox",
+        "sent": "Sent",
+        "spam": "Spam",
+        "trash": "Trash",
+        "important": "Important",
+    }
+    table = "conversation_index"
+    if label:
+        table = "conversation_labels"
+        clauses.append("c.label = ?")
+        values.append(label)
+    elif mailbox in mailbox_labels:
+        table = "conversation_labels"
+        clauses.append("c.label = ?")
+        values.append(mailbox_labels[mailbox])
+    elif mailbox:
+        return None
+
+    if params.get("attachments", [""])[0].strip() == "1":
+        clauses.append("c.attachment_count > 0")
+
+    return table, clauses, values
+
+
+def list_conversations_fast(params, table, clauses, values):
+    page = max(int(params.get("page", ["1"])[0] or "1"), 1)
+    page_size = min(max(int(params.get("page_size", ["50"])[0] or "50"), 10), 100)
+    offset = (page - 1) * page_size
+    sort = params.get("sort", ["date_desc"])[0]
+    order_by = {
+        "date_asc": "c.latest_date ASC",
+        "date_desc": "c.latest_date DESC",
+        "size_desc": "c.total_size_bytes DESC",
+        "size_asc": "c.total_size_bytes ASC",
+        "sender": "m.from_email ASC, c.latest_date DESC",
+        "subject": "m.subject ASC, c.latest_date DESC",
+    }.get(sort, "c.latest_date DESC")
+    where = " WHERE " + " AND ".join(clauses) if clauses else ""
+    rows = read_sql(
+        f"""
+        SELECT c.conversation_id, c.message_count, c.latest_date,
+               round(c.total_size_bytes / 1024.0 / 1024.0, 3) AS total_size_mb,
+               c.latest_message_id, m.from_display, m.from_email, m.from_domain,
+               m.subject, m.labels, m.preview, c.attachment_count
+        FROM {table} c
+        JOIN messages m ON m.id = c.latest_message_id
+        {where}
+        ORDER BY {order_by}
+        LIMIT ? OFFSET ?
+        """,
+        (*values, page_size, offset),
+    )
+    total = one_sql(f"SELECT count(*) AS n FROM {table} c {where}", values)["n"]
+    return {"rows": rows, "page": page, "page_size": page_size, "total": total}
+
+
 def list_conversations(params):
+    fast_filter = fast_conversation_filter(params)
+    if fast_filter:
+        return list_conversations_fast(params, *fast_filter)
+
     page = max(int(params.get("page", ["1"])[0] or "1"), 1)
     page_size = min(max(int(params.get("page_size", ["50"])[0] or "50"), 10), 100)
     offset = (page - 1) * page_size
@@ -451,7 +624,7 @@ def rewrite_inline_cids(rel_path, html_text):
             cid_map.setdefault(name, local_url)
             filename_map.setdefault(name, local_url)
 
-    raw_path = APP_DIR / "messages" / f"{message_id:06d}" / "raw.eml"
+    raw_path = DATA_DIR / "messages" / f"{message_id:06d}" / "raw.eml"
     if raw_path.exists():
         try:
             msg = BytesParser(policy=policy.default).parsebytes(raw_path.read_bytes())
@@ -485,7 +658,7 @@ INDEX_HTML = r"""<!doctype html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Gmail Local SQLite Viewer</title>
+<title>Mail Backup Local Viewer</title>
 <style>
 :root{--bg:#f4f6f8;--panel:#fff;--line:#d9dee5;--text:#202124;--muted:#67727e;--accent:#0b57d0;--accent-bg:#e8f0fe;--chip:#eef2f6;--nav-w:250px;--list-w:520px}
 *{box-sizing:border-box} html,body{height:100%;overflow:hidden} body{margin:0;font-family:Segoe UI,Arial,sans-serif;color:var(--text);background:var(--bg)}
@@ -514,8 +687,8 @@ input:focus,select:focus{outline:2px solid #c2dbff;border-color:#86b7ff}button{c
 <body>
 <div class="app">
   <aside>
-    <div class="brand">Gmail Local</div>
-    <div class="subbrand">SQLite sample viewer</div>
+    <div class="brand">Mail Backup</div>
+    <div class="subbrand">Local Gmail archive viewer</div>
     <button class="filter active" data-type="" data-value="">All mail</button>
     <button class="filter" data-type="mailbox" data-value="inbox">Inbox</button>
     <button class="filter" data-type="mailbox" data-value="sent">Sent</button>
@@ -623,8 +796,8 @@ class Handler(BaseHTTPRequestHandler):
 
         if parsed.path.startswith("/file/"):
             rel = unquote(parsed.path[len("/file/") :])
-            target = (APP_DIR / rel).resolve()
-            if not str(target).startswith(str(APP_DIR)) or not target.exists():
+            target = (DATA_DIR / rel).resolve()
+            if not str(target).startswith(str(DATA_DIR)) or not target.exists():
                 self.send_error(404)
                 return
             content_type = mimetypes.guess_type(target.name)[0] or "application/octet-stream"
@@ -649,7 +822,8 @@ def main():
     port = int(os.environ.get("GMAIL_VIEWER_PORT") or find_port())
     server = ThreadingHTTPServer((HOST, port), Handler)
     url = f"http://{HOST}:{port}/"
-    print(f"Gmail Local SQLite Viewer running at {url}")
+    print(f"Mail Backup Local Viewer running at {url}")
+    print(f"Data directory: {DATA_DIR}")
     print("Press Ctrl+C to stop.")
     threading.Timer(0.8, lambda: webbrowser.open(url)).start()
     server.serve_forever()

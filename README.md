@@ -47,6 +47,28 @@ On Windows:
 py -B import_mbox.py "C:\path\to\all-mail.mbox" --rebuild
 ```
 
+Production import with progress, validation, and a final summary:
+
+```powershell
+py -B import_mbox.py "C:\path\to\all-mail.mbox" --rebuild --progress 1000 --commit-every 500
+```
+
+If an import is interrupted, continue from the largest message id already stored:
+
+```powershell
+py -B import_mbox.py "C:\path\to\all-mail.mbox" --resume --progress 1000 --commit-every 500
+```
+
+For testing a larger sample without replacing the current data:
+
+```powershell
+py -B import_mbox.py "C:\path\to\all-mail.mbox" --out-dir ".\test_import_20000" --rebuild --limit 20000 --progress 2000
+$env:GMAIL_VIEWER_DATA_DIR = ".\test_import_20000"
+py -B app.py
+```
+
+Import reports are written under `reports/`, including `import_summary.json` and `import_errors.jsonl` when parsing errors occur.
+
 4. Start the viewer.
 
 On Windows, double-click:
@@ -80,6 +102,8 @@ python -B start.py
 ```
 
 The app starts a local web server on `127.0.0.1` using an automatically selected free port, then opens your browser. Press `Ctrl+C` to stop it.
+
+To open data stored outside the source folder, set `GMAIL_VIEWER_DATA_DIR` before launching the app.
 
 ## Files
 
@@ -158,6 +182,9 @@ SQLite stores searchable and sortable metadata:
 ```text
 messages
 attachments
+message_labels
+conversation_index
+conversation_labels
 messages_fts
 ```
 
@@ -170,6 +197,8 @@ messages/000001/raw.eml
 ```
 
 This keeps the database small and makes attachments easy to open with normal desktop apps.
+
+The app automatically creates or refreshes derived performance tables such as `message_labels`, `conversation_index`, and `conversation_labels` when opening an existing database. The first launch after an import may spend a short time building these indexes; later label and All Mail conversation lists should be much faster.
 
 ## Conversations
 

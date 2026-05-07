@@ -1,7 +1,11 @@
 import argparse
 import html
+import json
 import re
+import shutil
 import sqlite3
+import time
+import traceback
 from email import policy
 from email.parser import BytesParser
 from email.utils import getaddresses, parsedate_to_datetime
@@ -65,16 +69,19 @@ def thread_key(msg):
     return f"subject:{sender_domain}:{normalized}"
 
 
-def iter_mbox_messages(path, limit=0):
+def iter_mbox_messages(path, limit=0, skip_through=0):
     current = bytearray()
     current_from = b""
     count = 0
+    bytes_seen = 0
     with path.open("rb") as handle:
         for line in handle:
+            bytes_seen += len(line)
             if line.startswith(b"From "):
                 if current:
                     count += 1
-                    yield count, bytes(current), current_from
+                    if count > skip_through:
+                        yield count, bytes(current), current_from, bytes_seen
                     if limit and count >= limit:
                         return
                     current = bytearray()
@@ -83,7 +90,8 @@ def iter_mbox_messages(path, limit=0):
             current.extend(line)
         if current and (not limit or count < limit):
             count += 1
-            yield count, bytes(current), current_from
+            if count > skip_through:
+                yield count, bytes(current), current_from, bytes_seen
 
 
 def part_payload(part):
@@ -127,7 +135,7 @@ def init_db(conn):
     conn.executescript(
         """
         PRAGMA journal_mode=WAL;
-        CREATE TABLE messages (
+        CREATE TABLE IF NOT EXISTS messages (
           id INTEGER PRIMARY KEY,
           date TEXT,
           year TEXT,
@@ -150,9 +158,9 @@ def init_db(conn):
           references_text TEXT,
           thread_key TEXT
         );
-        CREATE INDEX idx_messages_thread_key ON messages(thread_key);
-        CREATE INDEX idx_messages_thread_date ON messages(thread_key, date DESC, id DESC);
-        CREATE TABLE attachments (
+        CREATE INDEX IF NOT EXISTS idx_messages_thread_key ON messages(thread_key);
+        CREATE INDEX IF NOT EXISTS idx_messages_thread_date ON messages(thread_key, date DESC, id DESC);
+        CREATE TABLE IF NOT EXISTS attachments (
           id INTEGER PRIMARY KEY AUTOINCREMENT,
           message_id INTEGER NOT NULL,
           filename TEXT,
@@ -162,20 +170,20 @@ def init_db(conn):
           size_mb REAL,
           FOREIGN KEY(message_id) REFERENCES messages(id)
         );
-        CREATE INDEX idx_attachments_message_id ON attachments(message_id);
-        CREATE TABLE message_labels (
+        CREATE INDEX IF NOT EXISTS idx_attachments_message_id ON attachments(message_id);
+        CREATE TABLE IF NOT EXISTS message_labels (
           label TEXT NOT NULL,
           message_id INTEGER NOT NULL,
           PRIMARY KEY(label, message_id),
           FOREIGN KEY(message_id) REFERENCES messages(id)
         );
-        CREATE INDEX idx_message_labels_message_id ON message_labels(message_id);
-        CREATE INDEX idx_messages_date ON messages(date);
-        CREATE INDEX idx_messages_year ON messages(year);
-        CREATE INDEX idx_messages_from_email ON messages(from_email);
-        CREATE INDEX idx_messages_from_domain ON messages(from_domain);
-        CREATE INDEX idx_messages_size ON messages(size_bytes);
-        CREATE VIRTUAL TABLE messages_fts USING fts5(
+        CREATE INDEX IF NOT EXISTS idx_message_labels_message_id ON message_labels(message_id);
+        CREATE INDEX IF NOT EXISTS idx_messages_date ON messages(date);
+        CREATE INDEX IF NOT EXISTS idx_messages_year ON messages(year);
+        CREATE INDEX IF NOT EXISTS idx_messages_from_email ON messages(from_email);
+        CREATE INDEX IF NOT EXISTS idx_messages_from_domain ON messages(from_domain);
+        CREATE INDEX IF NOT EXISTS idx_messages_size ON messages(size_bytes);
+        CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING fts5(
           subject, from_email, from_display, to_text, labels, preview, body_text,
           content='messages', content_rowid='id'
         );
@@ -183,17 +191,78 @@ def init_db(conn):
     )
 
 
-def reset_output(out_dir, rebuild):
+def reset_output(out_dir, rebuild, resume):
     db_path = out_dir / "gmail_index.sqlite"
     messages_dir = out_dir / "messages"
-    if db_path.exists() and not rebuild:
-        raise SystemExit(f"Database already exists. Use --rebuild to replace: {db_path}")
-    for suffix in ("", "-wal", "-shm"):
-        candidate = Path(str(db_path) + suffix)
-        if candidate.exists():
-            candidate.unlink()
+    if db_path.exists() and not rebuild and not resume:
+        raise SystemExit(f"Database already exists. Use --rebuild to replace or --resume to continue: {db_path}")
+    if rebuild:
+        for suffix in ("", "-wal", "-shm"):
+            candidate = Path(str(db_path) + suffix)
+            if candidate.exists():
+                candidate.unlink()
+        if messages_dir.exists():
+            shutil.rmtree(messages_dir)
     messages_dir.mkdir(parents=True, exist_ok=True)
     return db_path
+
+
+def write_json(path, payload):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
+
+
+def append_jsonl(path, payload):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(payload, ensure_ascii=False) + "\n")
+
+
+def db_scalar(conn, sql, params=()):
+    return conn.execute(sql, params).fetchone()[0]
+
+
+def max_imported_id(conn):
+    return db_scalar(conn, "SELECT COALESCE(MAX(id), 0) FROM messages")
+
+
+def validate_import(conn, out_dir):
+    rows = conn.execute("SELECT id, body_html_path, raw_eml_path FROM messages ORDER BY id").fetchall()
+    missing_body = []
+    missing_raw = []
+    for message_id, body_path, raw_path in rows:
+        if body_path and not (out_dir / body_path).exists():
+            missing_body.append(message_id)
+        if raw_path and not (out_dir / raw_path).exists():
+            missing_raw.append(message_id)
+    return {
+        "messages": len(rows),
+        "attachments": db_scalar(conn, "SELECT count(*) FROM attachments"),
+        "message_labels": db_scalar(conn, "SELECT count(*) FROM message_labels"),
+        "fts_rows": db_scalar(conn, "SELECT count(*) FROM messages_fts"),
+        "missing_body_html": missing_body[:50],
+        "missing_body_html_count": len(missing_body),
+        "missing_raw_eml": missing_raw[:50],
+        "missing_raw_eml_count": len(missing_raw),
+        "top_labels": [
+            {"label": row[0], "count": row[1]}
+            for row in conn.execute(
+                "SELECT label, count(*) FROM message_labels GROUP BY label ORDER BY count(*) DESC LIMIT 20"
+            )
+        ],
+        "top_domains": [
+            {"domain": row[0], "count": row[1], "mb": round(row[2] or 0, 2)}
+            for row in conn.execute(
+                "SELECT from_domain, count(*), sum(size_bytes)/1024.0/1024.0 FROM messages WHERE from_domain <> '' GROUP BY from_domain ORDER BY sum(size_bytes) DESC LIMIT 20"
+            )
+        ],
+        "largest_messages": [
+            {"id": row[0], "subject": row[1], "from": row[2], "mb": row[3]}
+            for row in conn.execute(
+                "SELECT id, subject, from_email, size_mb FROM messages ORDER BY size_bytes DESC LIMIT 20"
+            )
+        ],
+    }
 
 
 def insert_message(conn, index, raw_bytes, from_line, out_dir):
@@ -305,29 +374,99 @@ def main():
     parser.add_argument("--out-dir", type=Path, default=Path(__file__).resolve().parent)
     parser.add_argument("--limit", type=int, default=0)
     parser.add_argument("--rebuild", action="store_true")
+    parser.add_argument("--resume", action="store_true")
     parser.add_argument("--commit-every", type=int, default=500)
+    parser.add_argument("--progress", type=int, default=1000)
     args = parser.parse_args()
 
+    if args.rebuild and args.resume:
+        raise SystemExit("Use only one of --rebuild or --resume.")
+    if not args.mbox.exists():
+        raise SystemExit(f"MBOX not found: {args.mbox}")
+
     args.out_dir.mkdir(parents=True, exist_ok=True)
-    db_path = reset_output(args.out_dir, args.rebuild)
+    db_path = reset_output(args.out_dir, args.rebuild, args.resume)
+    reports_dir = args.out_dir / "reports"
+    error_log = reports_dir / "import_errors.jsonl"
+    summary_path = reports_dir / "import_summary.json"
+    if args.rebuild and error_log.exists():
+        error_log.unlink()
+
+    started = time.time()
+    mbox_size = args.mbox.stat().st_size
     conn = sqlite3.connect(db_path)
     init_db(conn)
+    skip_through = max_imported_id(conn) if args.resume else 0
+    imported = 0
+    failed = 0
+    seen = skip_through
+    last_bytes = 0
 
     try:
-        for index, raw, from_line in iter_mbox_messages(args.mbox, args.limit):
-            insert_message(conn, index, raw, from_line, args.out_dir)
+        for index, raw, from_line, bytes_seen in iter_mbox_messages(args.mbox, args.limit, skip_through):
+            seen = index
+            last_bytes = bytes_seen
+            conn.execute("SAVEPOINT message_import")
+            try:
+                insert_message(conn, index, raw, from_line, args.out_dir)
+                conn.execute("RELEASE SAVEPOINT message_import")
+                imported += 1
+            except Exception as exc:
+                conn.execute("ROLLBACK TO SAVEPOINT message_import")
+                conn.execute("RELEASE SAVEPOINT message_import")
+                failed += 1
+                message_dir = args.out_dir / "messages" / f"{index:06d}"
+                if message_dir.exists():
+                    shutil.rmtree(message_dir, ignore_errors=True)
+                append_jsonl(
+                    error_log,
+                    {
+                        "index": index,
+                        "error": str(exc),
+                        "traceback": traceback.format_exc(limit=8),
+                    },
+                )
             if index % args.commit_every == 0:
                 conn.commit()
-                print(f"indexed={index}", flush=True)
+            if args.progress and (index % args.progress == 0):
+                elapsed = max(time.time() - started, 0.001)
+                rate = imported / elapsed
+                pct = (bytes_seen / mbox_size * 100) if mbox_size else 0
+                print(
+                    f"seen={index} imported={imported} failed={failed} "
+                    f"mbox={pct:.1f}% rate={rate:.1f}/s",
+                    flush=True,
+                )
         conn.commit()
     finally:
-        message_count = conn.execute("SELECT count(*) FROM messages").fetchone()[0]
-        attachment_count = conn.execute("SELECT count(*) FROM attachments").fetchone()[0]
+        validation = validate_import(conn, args.out_dir)
+        summary = {
+            "mbox": str(args.mbox),
+            "out_dir": str(args.out_dir),
+            "db": str(db_path),
+            "mode": "rebuild" if args.rebuild else "resume" if args.resume else "new",
+            "limit": args.limit,
+            "started_at": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(started)),
+            "finished_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+            "elapsed_seconds": round(time.time() - started, 2),
+            "seen_message_index": seen,
+            "skipped_existing": skip_through,
+            "imported_this_run": imported,
+            "failed_this_run": failed,
+            "mbox_bytes_seen": last_bytes,
+            "mbox_size_bytes": mbox_size,
+            "validation": validation,
+        }
+        write_json(summary_path, summary)
+        message_count = validation["messages"]
+        attachment_count = validation["attachments"]
         conn.close()
 
     print(f"db={db_path}")
     print(f"messages={message_count}")
     print(f"attachments={attachment_count}")
+    print(f"failed={failed}")
+    print(f"summary={summary_path}")
 
 
 if __name__ == "__main__":
