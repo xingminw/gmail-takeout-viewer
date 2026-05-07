@@ -114,6 +114,7 @@ messages/
 - Local search over subject, sender, recipients, labels, preview, and body text
 - Sorting by date, size, sender, or subject
 - Filters for Inbox, Sent, Important, Spam, Trash, year, Gmail label, sender domain, and attachments
+- Top users filter for frequent senders/recipients, excluding your configured account emails and inferred Sent-mail accounts
 - HTML body display
 - Extracted attachment links
 - Raw message preservation as `raw.eml`

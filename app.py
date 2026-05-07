@@ -8,6 +8,7 @@ import sqlite3
 import threading
 import webbrowser
 from email import policy
+from email.utils import getaddresses
 from email.parser import BytesParser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -176,6 +177,11 @@ def build_where(params):
         clauses.append("m.from_domain = ?")
         values.append(domain)
 
+    user = params.get("user", [""])[0].strip().lower()
+    if user:
+        clauses.append("(LOWER(m.from_email) = ? OR LOWER(m.to_text) LIKE ?)")
+        values.extend([user, f"%{user}%"])
+
     attach = params.get("attachments", [""])[0].strip()
     if attach == "1":
         clauses.append("EXISTS (SELECT 1 FROM attachments a WHERE a.message_id = m.id)")
@@ -323,10 +329,30 @@ def facets():
             label = label.strip()
             if label:
                 labels[label] = labels.get(label, 0) + 1
+    self_emails = set(ACCOUNT_EMAILS)
+    for row in read_sql("SELECT DISTINCT LOWER(from_email) AS email FROM messages WHERE labels LIKE '%Sent%' AND from_email <> ''"):
+        self_emails.add(row["email"])
+    users = {}
+    for row in read_sql("SELECT from_email, to_text FROM messages"):
+        message_users = set()
+        from_email = (row.get("from_email") or "").strip().lower()
+        if from_email:
+            message_users.add(from_email)
+        for _, address in getaddresses([row.get("to_text") or ""]):
+            address = address.strip().lower()
+            if address:
+                message_users.add(address)
+        for address in message_users:
+            if address not in self_emails:
+                users[address] = users.get(address, 0) + 1
     return {
         "years": read_sql(
             "SELECT year AS name, count(*) AS count FROM messages WHERE year <> '' GROUP BY year ORDER BY year DESC"
         ),
+        "users": [
+            {"name": name, "count": count}
+            for name, count in sorted(users.items(), key=lambda item: item[1], reverse=True)[:40]
+        ],
         "domains": read_sql(
             "SELECT from_domain AS name, count(*) AS count FROM messages WHERE from_domain <> '' GROUP BY from_domain ORDER BY count DESC LIMIT 25"
         ),
@@ -467,6 +493,7 @@ input:focus,select:focus{outline:2px solid #c2dbff;border-color:#86b7ff}button{c
     <button class="filter" data-type="attachments" data-value="1">Has attachments</button>
     <details open><summary>Years</summary><div id="years"></div></details>
     <details open><summary>Labels</summary><div id="labels"></div></details>
+    <details><summary>Top users</summary><div id="users"></div></details>
     <details><summary>Top domains</summary><div id="domains"></div></details>
   </aside>
   <section class="list">
@@ -488,7 +515,7 @@ const $=id=>document.getElementById(id);
 function esc(s){return String(s||'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));}
 async function api(path){const r=await fetch(path); if(!r.ok) throw new Error(await r.text()); return await r.json();}
 function query(){const p=new URLSearchParams({page:state.page,page_size:state.pageSize,sort:state.sort}); if(state.q)p.set('q',state.q); if(state.filterType)p.set(state.filterType,state.filterValue); return p;}
-async function loadFacets(){const f=await api('/api/facets'); renderFacet('years',f.years,'year'); renderFacet('domains',f.domains,'domain'); renderFacet('labels',f.labels,'label'); bindFilters();}
+async function loadFacets(){const f=await api('/api/facets'); renderFacet('years',f.years,'year'); renderFacet('users',f.users,'user'); renderFacet('domains',f.domains,'domain'); renderFacet('labels',f.labels,'label'); bindFilters();}
 function renderFacet(id,rows,type){const limit=id==='labels'?40:rows.length; const visible=rows.slice(0,limit); const more=rows.length>limit?`<div class="small" style="padding:6px 10px">${rows.length-limit} more hidden</div>`:''; $(id).innerHTML=visible.map(r=>`<button class="filter" data-type="${type}" data-value="${esc(r.name)}"><span>${esc(r.name)}</span><span class="small">${r.count}</span></button>`).join('')+more;}
 function activateFilter(b,load=true){state.filterType=b.dataset.type||''; state.filterValue=b.dataset.value||''; state.page=1; document.querySelectorAll('.filter').forEach(x=>x.classList.toggle('active',x===b)); if(load)loadList();}
 function bindFilters(){document.querySelectorAll('.filter').forEach(b=>b.onclick=()=>activateFilter(b));}
