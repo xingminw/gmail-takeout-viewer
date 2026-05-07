@@ -172,6 +172,16 @@ def build_where(params):
         clauses.append("m.year = ?")
         values.append(year)
 
+    date_from = params.get("date_from", [""])[0].strip()
+    if date_from:
+        clauses.append("substr(m.date, 1, 10) >= ?")
+        values.append(date_from)
+
+    date_to = params.get("date_to", [""])[0].strip()
+    if date_to:
+        clauses.append("substr(m.date, 1, 10) <= ?")
+        values.append(date_to)
+
     domain = params.get("domain", [""])[0].strip()
     if domain:
         clauses.append("m.from_domain = ?")
@@ -456,20 +466,21 @@ INDEX_HTML = r"""<!doctype html>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Gmail Local SQLite Viewer</title>
 <style>
-:root{--bg:#f4f6f8;--panel:#fff;--line:#d9dee5;--text:#202124;--muted:#67727e;--accent:#0b57d0;--accent-bg:#e8f0fe;--chip:#eef2f6}
+:root{--bg:#f4f6f8;--panel:#fff;--line:#d9dee5;--text:#202124;--muted:#67727e;--accent:#0b57d0;--accent-bg:#e8f0fe;--chip:#eef2f6;--nav-w:250px;--list-w:520px}
 *{box-sizing:border-box} html,body{height:100%;overflow:hidden} body{margin:0;font-family:Segoe UI,Arial,sans-serif;color:var(--text);background:var(--bg)}
-.app{display:grid;grid-template-columns:250px minmax(410px,580px) 1fr;height:100vh;overflow:hidden}
+.app{display:grid;grid-template-columns:var(--nav-w) 6px var(--list-w) 6px minmax(360px,1fr);height:100vh;overflow:hidden}
 aside{border-right:1px solid var(--line);background:#fbfcfd;padding:16px 12px;overflow-y:auto;min-height:0}
+.resizer{background:#eef1f4;cursor:col-resize;min-width:6px}.resizer:hover,.resizer.dragging{background:#c8d6ee}
 .brand{font-size:21px;font-weight:650;margin:4px 10px 4px}.subbrand{font-size:12px;color:var(--muted);margin:0 10px 18px}
 .filter{display:flex;justify-content:space-between;gap:8px;width:100%;border:0;background:transparent;text-align:left;padding:8px 10px;border-radius:18px;cursor:pointer;color:var(--text);font-size:14px}
 .filter:hover,.filter.active{background:var(--accent-bg);color:#174ea6}.group{margin:20px 0 7px 10px;color:var(--muted);font-size:11px;text-transform:uppercase;font-weight:650;letter-spacing:.04em}
 details{margin-top:12px}summary{cursor:pointer;list-style:none;margin:0 0 7px 10px;color:var(--muted);font-size:11px;text-transform:uppercase;font-weight:650;letter-spacing:.04em}summary::-webkit-details-marker{display:none}
 .list{border-right:1px solid var(--line);background:var(--panel);display:flex;flex-direction:column;min-width:0;min-height:0;overflow:hidden}
-.toolbar{padding:12px;border-bottom:1px solid var(--line);display:grid;grid-template-columns:1fr 132px;gap:8px;align-items:center}
+.toolbar{padding:12px;border-bottom:1px solid var(--line);display:grid;grid-template-columns:1fr 132px 126px 126px;gap:8px;align-items:center}
 input,select,button{border:1px solid var(--line);border-radius:18px;padding:8px 12px;background:#fff;min-width:0;font:inherit}
 input:focus,select:focus{outline:2px solid #c2dbff;border-color:#86b7ff}button{cursor:pointer}
-.messages{overflow-y:auto;min-height:0;flex:1}.pager{padding:10px 12px;border-top:1px solid var(--line);color:var(--muted);font-size:13px;display:flex;justify-content:space-between;align-items:center}
-.pager button{min-width:72px}.row{padding:13px 15px;border-bottom:1px solid #edf0f2;cursor:pointer;border-left:3px solid transparent}
+.messages{overflow-y:auto;min-height:0;flex:1}.pager{padding:10px 12px;border-top:1px solid var(--line);color:var(--muted);font-size:13px;display:flex;justify-content:space-between;align-items:center;gap:8px}
+.pager button{min-width:72px}.page-jump{display:flex;align-items:center;gap:6px;min-width:150px;justify-content:center}.page-jump input{width:68px;text-align:center;padding:6px 8px}.row{padding:13px 15px;border-bottom:1px solid #edf0f2;cursor:pointer;border-left:3px solid transparent}
 .row:hover{background:#f8fbff}.row.active{background:#eef5ff;border-left-color:var(--accent)}
 .subject{font-weight:650;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.meta,.preview,.chips{font-size:12px;color:var(--muted);margin-top:5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .chip{display:inline-block;background:var(--chip);border-radius:12px;padding:2px 7px;margin-right:4px;color:#46515c}.detail{overflow-y:auto;background:var(--panel);padding:24px 30px;min-height:0}
@@ -496,6 +507,7 @@ input:focus,select:focus{outline:2px solid #c2dbff;border-color:#86b7ff}button{c
     <details><summary>Top users</summary><div id="users"></div></details>
     <details><summary>Top domains</summary><div id="domains"></div></details>
   </aside>
+  <div class="resizer" data-resize="nav" title="Drag to resize sidebar"></div>
   <section class="list">
     <div class="toolbar">
       <input id="q" placeholder='Search, e.g. from:example.edu subject:review has:attachment older:2025-01-01'>
@@ -503,32 +515,41 @@ input:focus,select:focus{outline:2px solid #c2dbff;border-color:#86b7ff}button{c
         <option value="date_desc">Newest</option><option value="date_asc">Oldest</option>
         <option value="size_desc">Largest</option><option value="size_asc">Smallest</option>
         <option value="sender">Sender</option><option value="subject">Subject</option>
-      </select>    </div>
+      </select>
+      <input id="dateFrom" type="date" title="Start date">
+      <input id="dateTo" type="date" title="End date">
+    </div>
     <div id="messages" class="messages"></div>
-    <div class="pager"><button id="prev">Prev</button><span id="status"></span><button id="next">Next</button></div>
+    <div class="pager"><button id="prev">Prev</button><div class="page-jump"><span id="status"></span><input id="pageJump" type="number" min="1" value="1" title="Page"></div><button id="next">Next</button></div>
   </section>
+  <div class="resizer" data-resize="list" title="Drag to resize message list"></div>
   <main id="detail" class="detail"><div class="empty">Select a message.</div></main>
 </div>
 <script>
-let state={page:1,pageSize:50,sort:'date_desc',q:'',filterType:'',filterValue:'',active:null,total:0};
+let state={page:1,pageSize:50,sort:'date_desc',q:'',dateFrom:'',dateTo:'',filterType:'',filterValue:'',active:null,total:0,pageCount:1};
 const $=id=>document.getElementById(id);
 function esc(s){return String(s||'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));}
 async function api(path){const r=await fetch(path); if(!r.ok) throw new Error(await r.text()); return await r.json();}
-function query(){const p=new URLSearchParams({page:state.page,page_size:state.pageSize,sort:state.sort}); if(state.q)p.set('q',state.q); if(state.filterType)p.set(state.filterType,state.filterValue); return p;}
+function query(){const p=new URLSearchParams({page:state.page,page_size:state.pageSize,sort:state.sort}); if(state.q)p.set('q',state.q); if(state.dateFrom)p.set('date_from',state.dateFrom); if(state.dateTo)p.set('date_to',state.dateTo); if(state.filterType)p.set(state.filterType,state.filterValue); return p;}
 async function loadFacets(){const f=await api('/api/facets'); renderFacet('years',f.years,'year'); renderFacet('users',f.users,'user'); renderFacet('domains',f.domains,'domain'); renderFacet('labels',f.labels,'label'); bindFilters();}
 function renderFacet(id,rows,type){const limit=id==='labels'?40:rows.length; const visible=rows.slice(0,limit); const more=rows.length>limit?`<div class="small" style="padding:6px 10px">${rows.length-limit} more hidden</div>`:''; $(id).innerHTML=visible.map(r=>`<button class="filter" data-type="${type}" data-value="${esc(r.name)}"><span>${esc(r.name)}</span><span class="small">${r.count}</span></button>`).join('')+more;}
 function activateFilter(b,load=true){state.filterType=b.dataset.type||''; state.filterValue=b.dataset.value||''; state.page=1; document.querySelectorAll('.filter').forEach(x=>x.classList.toggle('active',x===b)); if(load)loadList();}
 function bindFilters(){document.querySelectorAll('.filter').forEach(b=>b.onclick=()=>activateFilter(b));}
 function activateDefaultFilter(){const b=document.querySelector('.filter[data-type=""][data-value=""]'); if(b)activateFilter(b,false);}
-async function loadList(){const data=await api('/api/conversations?'+query().toString()); state.total=data.total; const rows=data.rows; $('messages').innerHTML=rows.map(m=>conversationRow(m)).join('')||'<div class="empty">No messages.</div>'; document.querySelectorAll('.row').forEach(r=>r.onclick=()=>showConversation(r.dataset.id)); const start=(data.page-1)*data.page_size+1; const end=Math.min(data.page*data.page_size,data.total); $('status').textContent=data.total?`${start}-${end} of ${data.total} conversations`:'0 messages'; $('prev').disabled=state.page<=1; $('next').disabled=end>=data.total;}
+async function loadList(){const data=await api('/api/conversations?'+query().toString()); state.total=data.total; state.page=data.page; state.pageSize=data.page_size; state.pageCount=Math.max(1,Math.ceil(data.total/data.page_size)); const rows=data.rows; $('messages').innerHTML=rows.map(m=>conversationRow(m)).join('')||'<div class="empty">No messages.</div>'; document.querySelectorAll('.row').forEach(r=>r.onclick=()=>showConversation(r.dataset.id)); const start=data.total?(data.page-1)*data.page_size+1:0; const end=Math.min(data.page*data.page_size,data.total); $('status').textContent=data.total?`${start}-${end} of ${data.total} | Page ${data.page}/${state.pageCount}`:'0 messages'; $('pageJump').value=data.page; $('pageJump').max=state.pageCount; $('prev').disabled=state.page<=1; $('next').disabled=end>=data.total;}
 function conversationRow(m){return `<div class="row ${m.conversation_id===state.active?'active':''}" data-id="${esc(m.conversation_id)}"><div class="subject">${esc(m.subject||'(no subject)')} ${m.message_count>1?`<span class="small">(${m.message_count})</span>`:''}</div><div class="meta">${esc(m.from_display)} - ${esc(m.latest_date)} - ${m.total_size_mb} MB</div><div class="preview">${esc(m.preview)}</div><div class="chips">${(m.labels||'').split(',').filter(Boolean).slice(0,5).map(l=>`<span class="chip">${esc(l.trim())}</span>`).join('')} ${m.attachment_count?`<span class="chip">${m.attachment_count} attachment(s)</span>`:''}</div></div>`;}
 function resizeFrame(frame){try{const doc=frame.contentDocument||frame.contentWindow.document; const h=Math.max(520, doc.documentElement.scrollHeight, doc.body.scrollHeight); frame.style.height=(h+24)+'px';}catch(e){}}
 function setActiveRow(id){state.active=id; document.querySelectorAll('.row').forEach(r=>r.classList.toggle('active', r.dataset.id===String(id)));}
 async function show(id){setActiveRow(id); $('detail').innerHTML='<div class="empty">Loading message...</div>'; const m=await api('/api/message/'+id); const atts=m.attachments.map(a=>`<a class="att" href="/file/${encodeURIComponent(a.path)}" target="_blank">${esc(a.filename)} - ${a.size_mb} MB</a>`).join(''); $('detail').innerHTML=`<h1>${esc(m.subject||'(no subject)')}</h1><div class="kv"><b>From:</b> ${esc(m.from_display)}</div><div class="kv"><b>To:</b> ${esc(m.to_text)}</div><div class="kv"><b>Date:</b> ${esc(m.date)}</div><div class="kv"><b>Size:</b> ${m.size_mb} MB</div><div class="chips">${(m.labels||'').split(',').filter(Boolean).map(l=>`<span class="chip">${esc(l.trim())}</span>`).join('')}</div>${atts?`<div class="attachments">${atts}</div>`:''}<iframe class="body-frame" sandbox="allow-same-origin" onload="resizeFrame(this)" src="/file/${encodeURIComponent(m.body_html_path)}"></iframe>`;}
 async function showConversation(id){setActiveRow(id); $('detail').innerHTML='<div class="empty">Loading conversation...</div>'; const c=await api('/api/conversation/'+encodeURIComponent(id)); const cards=c.messages.map(m=>{const atts=m.attachments.map(a=>`<a class="att" href="/file/${encodeURIComponent(a.path)}" target="_blank">${esc(a.filename)} - ${a.size_mb} MB</a>`).join(''); return `<section class="message-card"><div class="message-head"><div class="kv"><b>From:</b> ${esc(m.from_display)}</div><div class="kv"><b>To:</b> ${esc(m.to_text)}</div><div class="kv"><b>Date:</b> ${esc(m.date)}</div><div class="kv"><b>Size:</b> ${m.size_mb} MB</div>${atts?`<div class="attachments">${atts}</div>`:''}</div><div class="message-body"><iframe class="body-frame" sandbox="allow-same-origin" onload="resizeFrame(this)" src="/file/${encodeURIComponent(m.body_html_path)}"></iframe></div></section>`;}).join(''); $('detail').innerHTML=`<h1>${esc(c.subject||'(no subject)')}</h1><div class="kv"><b>Conversation:</b> ${c.message_count} message(s)</div>${cards}`;}
 $('q').addEventListener('keydown',e=>{if(e.key==='Enter'){state.q=$('q').value.trim(); state.page=1; loadList();}});
-$('sort').onchange=()=>{state.sort=$('sort').value; state.page=1; loadList();}; $('prev').onclick=()=>{if(state.page>1){state.page--;loadList();}}; $('next').onclick=()=>{state.page++;loadList();};
-async function init(){bindFilters(); activateDefaultFilter(); $('messages').innerHTML='<div class="empty">Loading all mail...</div>'; await loadFacets(); activateDefaultFilter(); await loadList();}
+$('sort').onchange=()=>{state.sort=$('sort').value; state.page=1; loadList();};
+$('dateFrom').onchange=()=>{state.dateFrom=$('dateFrom').value; state.page=1; loadList();}; $('dateTo').onchange=()=>{state.dateTo=$('dateTo').value; state.page=1; loadList();};
+$('pageJump').addEventListener('keydown',e=>{if(e.key==='Enter'){const page=Math.min(Math.max(parseInt($('pageJump').value||'1',10),1),state.pageCount); state.page=page; loadList();}});
+$('pageJump').addEventListener('change',()=>{const page=Math.min(Math.max(parseInt($('pageJump').value||'1',10),1),state.pageCount); state.page=page; loadList();});
+$('prev').onclick=()=>{if(state.page>1){state.page--;loadList();}}; $('next').onclick=()=>{if(state.page<state.pageCount){state.page++;loadList();}};
+function initResizers(){const root=document.documentElement; const savedNav=localStorage.getItem('gmailLocalNavW'); const savedList=localStorage.getItem('gmailLocalListW'); if(savedNav)root.style.setProperty('--nav-w',savedNav+'px'); if(savedList)root.style.setProperty('--list-w',savedList+'px'); document.querySelectorAll('.resizer').forEach(handle=>{handle.addEventListener('pointerdown',e=>{e.preventDefault(); handle.classList.add('dragging'); const type=handle.dataset.resize; const startX=e.clientX; const startNav=parseInt(getComputedStyle(root).getPropertyValue('--nav-w'),10); const startList=parseInt(getComputedStyle(root).getPropertyValue('--list-w'),10); handle.setPointerCapture(e.pointerId); const move=ev=>{if(type==='nav'){const w=Math.min(Math.max(startNav+ev.clientX-startX,180),420); root.style.setProperty('--nav-w',w+'px'); localStorage.setItem('gmailLocalNavW',w);}else{const w=Math.min(Math.max(startList+ev.clientX-startX,360),900); root.style.setProperty('--list-w',w+'px'); localStorage.setItem('gmailLocalListW',w);}}; const up=ev=>{handle.classList.remove('dragging'); handle.releasePointerCapture(ev.pointerId); handle.removeEventListener('pointermove',move); handle.removeEventListener('pointerup',up);}; handle.addEventListener('pointermove',move); handle.addEventListener('pointerup',up);});});}
+async function init(){initResizers(); bindFilters(); activateDefaultFilter(); $('messages').innerHTML='<div class="empty">Loading all mail...</div>'; await loadFacets(); activateDefaultFilter(); await loadList();}
 init();
 </script>
 </body></html>"""
