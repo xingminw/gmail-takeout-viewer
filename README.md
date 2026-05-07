@@ -59,6 +59,12 @@ If an import is interrupted, continue from the largest message id already stored
 py -B import_mbox.py "C:\path\to\all-mail.mbox" --resume --progress 1000 --commit-every 500
 ```
 
+If a small number of messages failed and you want to repair only those MBOX indexes after fixing the importer:
+
+```powershell
+py -B import_mbox.py "C:\path\to\all-mail.mbox" --resume --only-indexes 35472,35475
+```
+
 For testing a larger sample without replacing the current data:
 
 ```powershell
@@ -185,6 +191,7 @@ attachments
 message_labels
 conversation_index
 conversation_labels
+message_users
 messages_fts
 ```
 
@@ -198,7 +205,7 @@ messages/000001/raw.eml
 
 This keeps the database small and makes attachments easy to open with normal desktop apps.
 
-The app automatically creates or refreshes derived performance tables such as `message_labels`, `conversation_index`, and `conversation_labels` when opening an existing database. The first launch after an import may spend a short time building these indexes; later label and All Mail conversation lists should be much faster.
+The app automatically creates or refreshes derived performance tables such as `message_labels`, `conversation_index`, `conversation_labels`, and `message_users` when opening an existing database. The first launch after an import may spend a short time building these indexes; later label, All Mail, and Top Users lists should be much faster. Plain keyword searches use SQLite FTS; Gmail-like operator searches use the local SQL subset described above.
 
 ## Conversations
 

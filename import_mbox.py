@@ -1,6 +1,7 @@
 import argparse
 import html
 import json
+import os
 import re
 import shutil
 import sqlite3
@@ -18,11 +19,11 @@ def clean(value):
     return str(value).replace("\r", " ").replace("\n", " ").strip()
 
 
-def safe_name(value, fallback):
+def safe_name(value, fallback, max_length=120):
     value = value or fallback
     value = re.sub(r"[<>:\"/\\|?*\x00-\x1f]", "_", value)
     value = re.sub(r"\s+", " ", value).strip(" .")
-    return value[:160] or fallback
+    return value[:max_length].rstrip(" .") or fallback
 
 
 def parse_date(value):
@@ -69,7 +70,7 @@ def thread_key(msg):
     return f"subject:{sender_domain}:{normalized}"
 
 
-def iter_mbox_messages(path, limit=0, skip_through=0):
+def iter_mbox_messages(path, limit=0, skip_through=0, only_indexes=None):
     current = bytearray()
     current_from = b""
     count = 0
@@ -80,7 +81,7 @@ def iter_mbox_messages(path, limit=0, skip_through=0):
             if line.startswith(b"From "):
                 if current:
                     count += 1
-                    if count > skip_through:
+                    if count > skip_through and (only_indexes is None or count in only_indexes):
                         yield count, bytes(current), current_from, bytes_seen
                     if limit and count >= limit:
                         return
@@ -90,7 +91,7 @@ def iter_mbox_messages(path, limit=0, skip_through=0):
             current.extend(line)
         if current and (not limit or count < limit):
             count += 1
-            if count > skip_through:
+            if count > skip_through and (only_indexes is None or count in only_indexes):
                 yield count, bytes(current), current_from, bytes_seen
 
 
@@ -129,6 +130,18 @@ def html_to_text(html_text):
 
 def split_labels(labels):
     return [label.strip() for label in (labels or "").split(",") if label.strip()]
+
+
+def message_users(from_email, to_text):
+    emails = set()
+    from_email = (from_email or "").strip().lower()
+    if from_email:
+        emails.add(from_email)
+    for _, address in getaddresses([to_text or ""]):
+        address = address.strip().lower()
+        if address:
+            emails.add(address)
+    return sorted(emails)
 
 
 def init_db(conn):
@@ -178,6 +191,12 @@ def init_db(conn):
           FOREIGN KEY(message_id) REFERENCES messages(id)
         );
         CREATE INDEX IF NOT EXISTS idx_message_labels_message_id ON message_labels(message_id);
+        CREATE TABLE IF NOT EXISTS message_users (
+          email TEXT NOT NULL,
+          message_id INTEGER NOT NULL,
+          PRIMARY KEY(email, message_id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_message_users_message_id ON message_users(message_id);
         CREATE INDEX IF NOT EXISTS idx_messages_date ON messages(date);
         CREATE INDEX IF NOT EXISTS idx_messages_year ON messages(year);
         CREATE INDEX IF NOT EXISTS idx_messages_from_email ON messages(from_email);
@@ -202,9 +221,20 @@ def reset_output(out_dir, rebuild, resume):
             if candidate.exists():
                 candidate.unlink()
         if messages_dir.exists():
-            shutil.rmtree(messages_dir)
+            remove_tree(messages_dir)
     messages_dir.mkdir(parents=True, exist_ok=True)
     return db_path
+
+
+def remove_tree(path):
+    def on_error(func, item, exc_info):
+        try:
+            os.chmod(item, 0o700)
+            func(item)
+        except Exception:
+            raise
+
+    shutil.rmtree(path, onerror=on_error)
 
 
 def write_json(path, payload):
@@ -295,6 +325,7 @@ def insert_message(conn, index, raw_bytes, from_line, out_dir):
             if "." not in Path(safe).name and "/" in content_type:
                 ext = content_type.split("/", 1)[1].split(";", 1)[0]
                 safe = f"{safe}.{'jpg' if ext == 'jpeg' else ext}"
+            safe = safe_name(safe, f"attachment-{len(attachments) + 1}.bin")
             target = attachment_dir / safe
             if target.exists():
                 target.unlink()
@@ -321,6 +352,7 @@ def insert_message(conn, index, raw_bytes, from_line, out_dir):
     from_name, from_email, from_domain, from_display = parse_from(msg.get("From"))
     labels = clean(msg.get("X-Gmail-Labels"))
     subject = clean(msg.get("Subject"))
+    to_text = clean(msg.get("To"))
     preview = re.sub(r"\s+", " ", body_text).strip()[:500]
     size_mb = round(len(raw_bytes) / 1024 / 1024, 3)
 
@@ -334,7 +366,7 @@ def insert_message(conn, index, raw_bytes, from_line, out_dir):
         """,
         (
             index, date, year, from_name, from_email, from_domain, from_display,
-            clean(msg.get("To")), subject, labels, clean(msg.get("Message-ID")),
+            to_text, subject, labels, clean(msg.get("Message-ID")),
             len(raw_bytes), size_mb, preview, body_text,
             body_path.relative_to(out_dir).as_posix(),
             raw_path.relative_to(out_dir).as_posix(),
@@ -350,12 +382,17 @@ def insert_message(conn, index, raw_bytes, from_line, out_dir):
         (rowid,subject,from_email,from_display,to_text,labels,preview,body_text)
         VALUES (?,?,?,?,?,?,?,?)
         """,
-        (index, subject, from_email, from_display, clean(msg.get("To")), labels, preview, body_text),
+        (index, subject, from_email, from_display, to_text, labels, preview, body_text),
     )
     for label in split_labels(labels):
         conn.execute(
             "INSERT OR IGNORE INTO message_labels(label, message_id) VALUES (?, ?)",
             (label, index),
+        )
+    for email in message_users(from_email, to_text):
+        conn.execute(
+            "INSERT OR IGNORE INTO message_users(email, message_id) VALUES (?, ?)",
+            (email, index),
         )
     for filename, path, content_type, size in attachments:
         conn.execute(
@@ -377,6 +414,7 @@ def main():
     parser.add_argument("--resume", action="store_true")
     parser.add_argument("--commit-every", type=int, default=500)
     parser.add_argument("--progress", type=int, default=1000)
+    parser.add_argument("--only-indexes", default="", help="Comma-separated 1-based MBOX message indexes to import or repair.")
     args = parser.parse_args()
 
     if args.rebuild and args.resume:
@@ -396,16 +434,19 @@ def main():
     mbox_size = args.mbox.stat().st_size
     conn = sqlite3.connect(db_path)
     init_db(conn)
-    skip_through = max_imported_id(conn) if args.resume else 0
+    only_indexes = {int(item) for item in re.split(r"[,\s]+", args.only_indexes.strip()) if item}
+    skip_through = 0 if only_indexes else max_imported_id(conn) if args.resume else 0
     imported = 0
     failed = 0
     seen = skip_through
     last_bytes = 0
 
     try:
-        for index, raw, from_line, bytes_seen in iter_mbox_messages(args.mbox, args.limit, skip_through):
+        for index, raw, from_line, bytes_seen in iter_mbox_messages(args.mbox, args.limit, skip_through, only_indexes or None):
             seen = index
             last_bytes = bytes_seen
+            if conn.execute("SELECT 1 FROM messages WHERE id = ?", (index,)).fetchone():
+                continue
             conn.execute("SAVEPOINT message_import")
             try:
                 insert_message(conn, index, raw, from_line, args.out_dir)

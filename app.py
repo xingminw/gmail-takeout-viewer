@@ -80,6 +80,12 @@ def ensure_performance_schema():
               PRIMARY KEY(label, message_id)
             );
             CREATE INDEX IF NOT EXISTS idx_message_labels_message_id ON message_labels(message_id);
+            CREATE TABLE IF NOT EXISTS message_users (
+              email TEXT NOT NULL,
+              message_id INTEGER NOT NULL,
+              PRIMARY KEY(email, message_id)
+            );
+            CREATE INDEX IF NOT EXISTS idx_message_users_message_id ON message_users(message_id);
             CREATE INDEX IF NOT EXISTS idx_attachments_message_id ON attachments(message_id);
             CREATE INDEX IF NOT EXISTS idx_messages_thread_date ON messages(thread_key, date DESC, id DESC);
             CREATE TABLE IF NOT EXISTS conversation_index (
@@ -118,6 +124,28 @@ def ensure_performance_schema():
             conn.executemany(
                 "INSERT OR IGNORE INTO message_labels(label, message_id) VALUES (?, ?)",
                 label_rows,
+            )
+        indexed_users = conn.execute("SELECT count(DISTINCT message_id) FROM message_users").fetchone()[0]
+        expected_users = conn.execute(
+            "SELECT count(*) FROM messages WHERE from_email <> '' OR to_text <> ''"
+        ).fetchone()[0]
+        if indexed_users != expected_users:
+            conn.execute("DELETE FROM message_users")
+            rows = conn.execute("SELECT id, from_email, to_text FROM messages WHERE from_email <> '' OR to_text <> ''")
+            user_rows = []
+            for message_id, from_email, to_text in rows:
+                emails = set()
+                from_email = (from_email or "").strip().lower()
+                if from_email:
+                    emails.add(from_email)
+                for _, address in getaddresses([to_text or ""]):
+                    address = address.strip().lower()
+                    if address:
+                        emails.add(address)
+                user_rows.extend((email, message_id) for email in emails)
+            conn.executemany(
+                "INSERT OR IGNORE INTO message_users(email, message_id) VALUES (?, ?)",
+                user_rows,
             )
         expected_conversations = conn.execute(
             "SELECT count(DISTINCT COALESCE(NULLIF(thread_key, ''), 'message:' || id)) FROM messages"
@@ -219,6 +247,13 @@ def parse_size(value):
     return int(number)
 
 
+def fts_query(text):
+    tokens = re.findall(r"[\w@.+-]+", text, flags=re.UNICODE)
+    if not tokens:
+        return ""
+    return " AND ".join('"' + token.replace('"', '""') + '"' for token in tokens)
+
+
 def add_text_search(clauses, values, text):
     text = text.strip()
     if not text:
@@ -298,7 +333,15 @@ def build_where(params):
     values = []
 
     q = params.get("q", [""])[0].strip()
-    apply_search_query(q, clauses, values)
+    if q and ":" not in q:
+        match_query = fts_query(q)
+        if match_query:
+            clauses.append("m.id IN (SELECT rowid FROM messages_fts WHERE messages_fts MATCH ?)")
+            values.append(match_query)
+        else:
+            apply_search_query(q, clauses, values)
+    else:
+        apply_search_query(q, clauses, values)
 
     label = params.get("label", [""])[0].strip()
     if label:
@@ -327,8 +370,8 @@ def build_where(params):
 
     user = params.get("user", [""])[0].strip().lower()
     if user:
-        clauses.append("(LOWER(m.from_email) = ? OR LOWER(m.to_text) LIKE ?)")
-        values.extend([user, f"%{user}%"])
+        clauses.append("EXISTS (SELECT 1 FROM message_users mu WHERE mu.message_id = m.id AND mu.email = ?)")
+        values.append(user)
 
     attach = params.get("attachments", [""])[0].strip()
     if attach == "1":
@@ -535,29 +578,29 @@ def list_conversations(params):
 
 def facets():
     self_emails = set(ACCOUNT_EMAILS)
-    for row in read_sql("SELECT DISTINCT LOWER(from_email) AS email FROM messages WHERE labels LIKE '%Sent%' AND from_email <> ''"):
+    for row in read_sql(
+        """
+        SELECT DISTINCT LOWER(m.from_email) AS email
+        FROM messages m
+        JOIN message_labels ml ON ml.message_id = m.id
+        WHERE ml.label = 'Sent' AND m.from_email <> ''
+        """
+    ):
         self_emails.add(row["email"])
-    users = {}
-    for row in read_sql("SELECT from_email, to_text FROM messages"):
-        message_users = set()
-        from_email = (row.get("from_email") or "").strip().lower()
-        if from_email:
-            message_users.add(from_email)
-        for _, address in getaddresses([row.get("to_text") or ""]):
-            address = address.strip().lower()
-            if address:
-                message_users.add(address)
-        for address in message_users:
-            if address not in self_emails:
-                users[address] = users.get(address, 0) + 1
+    user_exclusion = ""
+    user_params = []
+    if self_emails:
+        placeholders = ",".join("?" for _ in self_emails)
+        user_exclusion = f"WHERE email NOT IN ({placeholders})"
+        user_params = sorted(self_emails)
     return {
         "years": read_sql(
             "SELECT year AS name, count(*) AS count FROM messages WHERE year <> '' GROUP BY year ORDER BY year DESC"
         ),
-        "users": [
-            {"name": name, "count": count}
-            for name, count in sorted(users.items(), key=lambda item: item[1], reverse=True)[:40]
-        ],
+        "users": read_sql(
+            f"SELECT email AS name, count(*) AS count FROM message_users {user_exclusion} GROUP BY email ORDER BY count DESC LIMIT 40",
+            user_params,
+        ),
         "domains": read_sql(
             "SELECT from_domain AS name, count(*) AS count FROM messages WHERE from_domain <> '' GROUP BY from_domain ORDER BY count DESC LIMIT 25"
         ),
