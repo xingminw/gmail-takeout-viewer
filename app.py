@@ -65,6 +65,41 @@ def one_sql(sql, params=()):
         return dict(row) if row else None
 
 
+def split_labels(labels):
+    return [label.strip() for label in (labels or "").split(",") if label.strip()]
+
+
+def ensure_performance_schema():
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.executescript(
+            """
+            CREATE TABLE IF NOT EXISTS message_labels (
+              label TEXT NOT NULL,
+              message_id INTEGER NOT NULL,
+              PRIMARY KEY(label, message_id)
+            );
+            CREATE INDEX IF NOT EXISTS idx_message_labels_message_id ON message_labels(message_id);
+            CREATE INDEX IF NOT EXISTS idx_attachments_message_id ON attachments(message_id);
+            CREATE INDEX IF NOT EXISTS idx_messages_thread_date ON messages(thread_key, date DESC, id DESC);
+            """
+        )
+        indexed = conn.execute("SELECT count(DISTINCT message_id) FROM message_labels").fetchone()[0]
+        expected = conn.execute("SELECT count(*) FROM messages WHERE labels <> ''").fetchone()[0]
+        if indexed != expected:
+            conn.execute("DELETE FROM message_labels")
+            rows = conn.execute("SELECT id, labels FROM messages WHERE labels <> ''")
+            label_rows = [
+                (label, message_id)
+                for message_id, labels in rows
+                for label in split_labels(labels)
+            ]
+            conn.executemany(
+                "INSERT OR IGNORE INTO message_labels(label, message_id) VALUES (?, ?)",
+                label_rows,
+            )
+        conn.execute("PRAGMA optimize")
+
+
 
 def parse_size(value):
     match = re.fullmatch(r"(\d+(?:\.\d+)?)([kKmMgG]?)", value.strip())
@@ -164,8 +199,8 @@ def build_where(params):
 
     label = params.get("label", [""])[0].strip()
     if label:
-        clauses.append("m.labels LIKE ?")
-        values.append(f"%{label}%")
+        clauses.append("EXISTS (SELECT 1 FROM message_labels ml WHERE ml.message_id = m.id AND ml.label = ?)")
+        values.append(label)
 
     year = params.get("year", [""])[0].strip()
     if year:
@@ -264,13 +299,13 @@ def list_conversations(params):
     offset = (page - 1) * page_size
     sort = params.get("sort", ["date_desc"])[0]
     order_by = {
-        "date_asc": "g.latest_date ASC",
-        "date_desc": "g.latest_date DESC",
-        "size_desc": "g.total_size_bytes DESC",
-        "size_asc": "g.total_size_bytes ASC",
-        "sender": "latest.from_email ASC, g.latest_date DESC",
-        "subject": "latest.subject ASC, g.latest_date DESC",
-    }.get(sort, "g.latest_date DESC")
+        "date_asc": "r.latest_date ASC",
+        "date_desc": "r.latest_date DESC",
+        "size_desc": "r.total_size_bytes DESC",
+        "size_asc": "r.total_size_bytes ASC",
+        "sender": "r.from_email ASC, r.latest_date DESC",
+        "subject": "r.subject ASC, r.latest_date DESC",
+    }.get(sort, "r.latest_date DESC")
 
     where, values = build_where(params)
     base = f"""
@@ -280,39 +315,32 @@ def list_conversations(params):
           FROM messages m
           {where}
         ),
-        grouped AS (
-          SELECT conversation_id,
-                 count(*) AS message_count,
-                 max(date) AS latest_date,
-                 sum(size_bytes) AS total_size_bytes,
-                 max(id) AS fallback_latest_id
-          FROM filtered
-          GROUP BY conversation_id
-        ),
-        latest AS (
-          SELECT f.*
+        ranked AS (
+          SELECT f.*,
+                 count(*) OVER (PARTITION BY conversation_id) AS message_count,
+                 max(date) OVER (PARTITION BY conversation_id) AS latest_date,
+                 sum(size_bytes) OVER (PARTITION BY conversation_id) AS total_size_bytes,
+                 row_number() OVER (PARTITION BY conversation_id ORDER BY date DESC, id DESC) AS rn
           FROM filtered f
-          JOIN grouped g ON g.conversation_id = f.conversation_id
-          WHERE f.id = (
-            SELECT f2.id
-            FROM filtered f2
-            WHERE f2.conversation_id = f.conversation_id
-            ORDER BY f2.date DESC, f2.id DESC
-            LIMIT 1
-          )
+        ),
+        attachment_counts AS (
+          SELECT r.conversation_id, count(a.id) AS attachment_count
+          FROM ranked r
+          LEFT JOIN attachments a ON a.message_id = r.id
+          GROUP BY r.conversation_id
         )
     """
     rows = read_sql(
         base
         + f"""
-        SELECT g.conversation_id, g.message_count, g.latest_date,
-               round(g.total_size_bytes / 1024.0 / 1024.0, 3) AS total_size_mb,
-               latest.id AS latest_message_id, latest.from_display, latest.from_email,
-               latest.from_domain, latest.subject, latest.labels, latest.preview,
-               (SELECT count(*) FROM attachments a JOIN filtered f ON f.id = a.message_id
-                WHERE f.conversation_id = g.conversation_id) AS attachment_count
-        FROM grouped g
-        JOIN latest ON latest.conversation_id = g.conversation_id
+        SELECT r.conversation_id, r.message_count, r.latest_date,
+               round(r.total_size_bytes / 1024.0 / 1024.0, 3) AS total_size_mb,
+               r.id AS latest_message_id, r.from_display, r.from_email,
+               r.from_domain, r.subject, r.labels, r.preview,
+               COALESCE(ac.attachment_count, 0) AS attachment_count
+        FROM ranked r
+        LEFT JOIN attachment_counts ac ON ac.conversation_id = r.conversation_id
+        WHERE r.rn = 1
         ORDER BY {order_by}
         LIMIT ? OFFSET ?
         """,
@@ -333,12 +361,6 @@ def list_conversations(params):
 
 
 def facets():
-    labels = {}
-    for row in read_sql("SELECT labels FROM messages WHERE labels <> ''"):
-        for label in row["labels"].split(","):
-            label = label.strip()
-            if label:
-                labels[label] = labels.get(label, 0) + 1
     self_emails = set(ACCOUNT_EMAILS)
     for row in read_sql("SELECT DISTINCT LOWER(from_email) AS email FROM messages WHERE labels LIKE '%Sent%' AND from_email <> ''"):
         self_emails.add(row["email"])
@@ -366,10 +388,9 @@ def facets():
         "domains": read_sql(
             "SELECT from_domain AS name, count(*) AS count FROM messages WHERE from_domain <> '' GROUP BY from_domain ORDER BY count DESC LIMIT 25"
         ),
-        "labels": [
-            {"name": name, "count": count}
-            for name, count in sorted(labels.items(), key=lambda item: item[1], reverse=True)
-        ],
+        "labels": read_sql(
+            "SELECT label AS name, count(*) AS count FROM message_labels GROUP BY label ORDER BY count DESC"
+        ),
     }
 
 
@@ -624,6 +645,7 @@ class Handler(BaseHTTPRequestHandler):
 def main():
     if not DB_PATH.exists():
         raise SystemExit(f"Missing database: {DB_PATH}")
+    ensure_performance_schema()
     port = int(os.environ.get("GMAIL_VIEWER_PORT") or find_port())
     server = ThreadingHTTPServer((HOST, port), Handler)
     url = f"http://{HOST}:{port}/"

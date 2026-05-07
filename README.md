@@ -117,6 +117,7 @@ messages/
 - Top users filter for frequent senders/recipients, excluding your configured account emails and inferred Sent-mail accounts
 - Page jump controls for conversation results
 - Resizable sidebar, conversation list, and message detail columns
+- Indexed label filtering and optimized conversation list queries for larger archives
 - HTML body display
 - Extracted attachment links
 - Raw message preservation as `raw.eml`

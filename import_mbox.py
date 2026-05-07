@@ -119,6 +119,10 @@ def html_to_text(html_text):
     return re.sub(r"[ \t]+", " ", text).strip()
 
 
+def split_labels(labels):
+    return [label.strip() for label in (labels or "").split(",") if label.strip()]
+
+
 def init_db(conn):
     conn.executescript(
         """
@@ -147,6 +151,7 @@ def init_db(conn):
           thread_key TEXT
         );
         CREATE INDEX idx_messages_thread_key ON messages(thread_key);
+        CREATE INDEX idx_messages_thread_date ON messages(thread_key, date DESC, id DESC);
         CREATE TABLE attachments (
           id INTEGER PRIMARY KEY AUTOINCREMENT,
           message_id INTEGER NOT NULL,
@@ -157,6 +162,14 @@ def init_db(conn):
           size_mb REAL,
           FOREIGN KEY(message_id) REFERENCES messages(id)
         );
+        CREATE INDEX idx_attachments_message_id ON attachments(message_id);
+        CREATE TABLE message_labels (
+          label TEXT NOT NULL,
+          message_id INTEGER NOT NULL,
+          PRIMARY KEY(label, message_id),
+          FOREIGN KEY(message_id) REFERENCES messages(id)
+        );
+        CREATE INDEX idx_message_labels_message_id ON message_labels(message_id);
         CREATE INDEX idx_messages_date ON messages(date);
         CREATE INDEX idx_messages_year ON messages(year);
         CREATE INDEX idx_messages_from_email ON messages(from_email);
@@ -270,6 +283,11 @@ def insert_message(conn, index, raw_bytes, from_line, out_dir):
         """,
         (index, subject, from_email, from_display, clean(msg.get("To")), labels, preview, body_text),
     )
+    for label in split_labels(labels):
+        conn.execute(
+            "INSERT OR IGNORE INTO message_labels(label, message_id) VALUES (?, ?)",
+            (label, index),
+        )
     for filename, path, content_type, size in attachments:
         conn.execute(
             """
