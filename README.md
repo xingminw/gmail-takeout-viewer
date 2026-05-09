@@ -83,6 +83,18 @@ On Windows, double-click:
 start.bat
 ```
 
+On Windows with bundled portable Python, double-click:
+
+```text
+start_portable.bat
+```
+
+To install the bundled Windows Python runtime into `runtime/python-windows-x64`, run once:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File tools\bootstrap_portable_windows.ps1
+```
+
 On macOS, double-click:
 
 ```text
@@ -119,11 +131,13 @@ Tracked source files:
 app.py                 Local web app and browser UI
 import_mbox.py         Imports a Gmail Takeout MBOX into the viewer format
 start.bat              Windows launcher
+start_portable.bat     Windows launcher using bundled runtime/python-windows-x64 when present
 start.command          macOS double-click launcher
 start.sh               macOS/Linux launcher
 start.py               Cross-platform Python entrypoint
 config.example.json    Example local account config
 requirements.txt       Notes that no packages are required
+tools/                 Helper scripts for building portable runtime folders
 ```
 
 Generated local data, ignored by git:
@@ -134,6 +148,7 @@ gmail_index.sqlite
 gmail_index.sqlite-shm
 gmail_index.sqlite-wal
 messages/
+runtime/
 *.mbox
 *.eml
 ```

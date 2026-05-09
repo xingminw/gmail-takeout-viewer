@@ -19,6 +19,7 @@ exports/
 *.csv
 *.jsonl
 test_import_*/
+runtime/
 
 # Python / OS/editor noise
 __pycache__/
