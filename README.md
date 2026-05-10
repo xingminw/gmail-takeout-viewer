@@ -130,6 +130,7 @@ Tracked source files:
 ```text
 app.py                 Local web app and browser UI
 import_mbox.py         Imports a Gmail Takeout MBOX into the viewer format
+analyze_mbox_stats.py  Header-only MBOX statistics without extracting message bodies
 start.bat              Windows launcher
 start_portable.bat     Windows launcher using bundled runtime/python-windows-x64 when present
 start.command          macOS double-click launcher
