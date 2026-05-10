@@ -1,6 +1,6 @@
 # Mail Backup Local Viewer
 
-A local-only viewer for Gmail Takeout MBOX exports. It imports an MBOX into a SQLite index plus local message files, then serves a Gmail-like browser UI on `127.0.0.1`.
+A local-only viewer for Gmail Takeout MBOX exports. It imports an MBOX into a SQLite index plus local archive files, then serves a Gmail-like browser UI on `127.0.0.1`.
 
 The repository contains only application code and documentation. Real mail data, SQLite indexes, attachments, raw `.eml` files, and local config are intentionally ignored by git.
 
@@ -35,7 +35,7 @@ Copy-Item config.example.json config.json
 }
 ```
 
-3. Import an MBOX:
+3. Import an MBOX. Compact storage is the default: message body HTML is stored in SQLite, raw `.eml` files are not copied per message, MBOX byte offsets are indexed, and attachments are deduplicated into `blobs/aa/bb/<sha256>.blob`:
 
 ```sh
 python -B import_mbox.py "/path/to/all-mail.mbox" --rebuild
@@ -52,6 +52,8 @@ Production import with progress, validation, and a final summary:
 ```powershell
 py -B import_mbox.py "C:\path\to\all-mail.mbox" --rebuild --progress 1000 --commit-every 500
 ```
+
+To use the old file-per-message layout, add `--storage legacy` (or `--legacy`). Legacy mode writes `messages/000001/body.html`, `messages/000001/raw.eml`, and per-message attachment files.
 
 If an import is interrupted, continue from the largest message id already stored:
 
@@ -119,6 +121,14 @@ Cross-platform Python entrypoint:
 python -B start.py
 ```
 
+Portable relative launcher entrypoint:
+
+```sh
+python -B portable/launch.py --data-dir .
+```
+
+The `portable/` folder also includes `launch.bat`, `launch.command`, and `launch.sh`. These resolve paths relative to the application folder, set `GMAIL_VIEWER_DATA_DIR`, start the local app, and let `app.py` open the browser. Move the whole folder together with `gmail_index.sqlite` and `blobs/` to keep a portable archive.
+
 The app starts a local web server on `127.0.0.1` using an automatically selected free port, then opens your browser. Press `Ctrl+C` to stop it.
 
 To open data stored outside the source folder, set `GMAIL_VIEWER_DATA_DIR` before launching the app.
@@ -131,6 +141,7 @@ Tracked source files:
 app.py                 Local web app and browser UI
 import_mbox.py         Imports a Gmail Takeout MBOX into the viewer format
 analyze_mbox_stats.py  Header-only MBOX statistics without extracting message bodies
+portable/              Relative-path launchers for portable archives
 start.bat              Windows launcher
 start_portable.bat     Windows launcher using bundled runtime/python-windows-x64 when present
 start.command          macOS double-click launcher
@@ -149,6 +160,7 @@ gmail_index.sqlite
 gmail_index.sqlite-shm
 gmail_index.sqlite-wal
 messages/
+blobs/
 runtime/
 *.mbox
 *.eml
@@ -166,7 +178,7 @@ runtime/
 - Indexed label filtering and optimized conversation list queries for larger archives
 - HTML body display
 - Extracted attachment links
-- Raw message preservation as `raw.eml`
+- Compact storage by default, with legacy `raw.eml` preservation available via `--storage legacy`
 
 ## Search Syntax
 
@@ -211,7 +223,16 @@ message_users
 messages_fts
 ```
 
-Large display files stay on disk:
+Compact mode, the default, stores searchable metadata, body text, and display HTML in SQLite, records the source MBOX path/offset/length for each message, and stores attachments as deduplicated blobs:
+
+```text
+gmail_index.sqlite
+blobs/aa/bb/<sha256>.blob
+```
+
+Compact mode intentionally does not create `messages/000001/` directories or copy `raw.eml` files for every email. Keep the original MBOX as the source-of-truth backup; a raw-message export tool can use the stored MBOX offsets later.
+
+Legacy mode keeps large display files on disk:
 
 ```text
 messages/000001/body.html
@@ -219,7 +240,7 @@ messages/000001/attachments/...
 messages/000001/raw.eml
 ```
 
-This keeps the database small and makes attachments easy to open with normal desktop apps.
+Legacy mode keeps the database smaller and makes attachments easy to inspect per message, but it creates many files.
 
 The app automatically creates or refreshes derived performance tables such as `message_labels`, `conversation_index`, `conversation_labels`, and `message_users` when opening an existing database. The first launch after an import may spend a short time building these indexes; later label, All Mail, and Top Users lists should be much faster. Plain keyword searches use SQLite FTS; Gmail-like operator searches use the local SQL subset described above.
 
@@ -244,9 +265,9 @@ The importer preserves enough data for local viewing and later export:
 
 - searchable metadata in SQLite
 - searchable plain text body in SQLite
-- sanitized HTML body for display
-- extracted attachments as files
-- raw RFC 822 message bytes as `raw.eml`
+- sanitized HTML body for display, in SQLite for compact mode or as `body.html` for legacy mode
+- extracted attachments as deduplicated blob files in compact mode or per-message files in legacy mode
+- raw RFC 822 message bytes as `raw.eml` only in legacy mode; compact mode stores MBOX source path, byte offset, and byte length instead
 - the original MBOX `From ` separator line in SQLite
 - thread metadata from `In-Reply-To` and `References`
 

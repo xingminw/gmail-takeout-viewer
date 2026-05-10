@@ -1,5 +1,6 @@
 import argparse
 import html
+import hashlib
 import json
 import os
 import re
@@ -75,6 +76,7 @@ def iter_mbox_messages(path, limit=0, skip_through=0, only_indexes=None):
     current_from = b""
     count = 0
     bytes_seen = 0
+    current_start = 0
     with path.open("rb") as handle:
         for line in handle:
             bytes_seen += len(line)
@@ -82,17 +84,18 @@ def iter_mbox_messages(path, limit=0, skip_through=0, only_indexes=None):
                 if current:
                     count += 1
                     if count > skip_through and (only_indexes is None or count in only_indexes):
-                        yield count, bytes(current), current_from, bytes_seen
+                        yield count, bytes(current), current_from, current_start, len(current)
                     if limit and count >= limit:
                         return
                     current = bytearray()
                 current_from = line
+                current_start = bytes_seen
                 continue
             current.extend(line)
         if current and (not limit or count < limit):
             count += 1
             if count > skip_through and (only_indexes is None or count in only_indexes):
-                yield count, bytes(current), current_from, bytes_seen
+                yield count, bytes(current), current_from, current_start, len(current)
 
 
 def part_payload(part):
@@ -164,8 +167,13 @@ def init_db(conn):
           size_mb REAL,
           preview TEXT,
           body_text TEXT,
+          body_html TEXT,
           body_html_path TEXT,
           raw_eml_path TEXT,
+          mbox_path TEXT,
+          mbox_offset INTEGER,
+          mbox_length INTEGER,
+          storage_mode TEXT,
           mbox_from_line TEXT,
           in_reply_to TEXT,
           references_text TEXT,
@@ -181,6 +189,7 @@ def init_db(conn):
           content_type TEXT,
           size_bytes INTEGER,
           size_mb REAL,
+          sha256 TEXT,
           FOREIGN KEY(message_id) REFERENCES messages(id)
         );
         CREATE INDEX IF NOT EXISTS idx_attachments_message_id ON attachments(message_id);
@@ -208,11 +217,24 @@ def init_db(conn):
         );
         """
     )
+    ensure_column(conn, "messages", "body_html", "TEXT")
+    ensure_column(conn, "messages", "mbox_path", "TEXT")
+    ensure_column(conn, "messages", "mbox_offset", "INTEGER")
+    ensure_column(conn, "messages", "mbox_length", "INTEGER")
+    ensure_column(conn, "messages", "storage_mode", "TEXT")
+    ensure_column(conn, "attachments", "sha256", "TEXT")
 
 
-def reset_output(out_dir, rebuild, resume):
+def ensure_column(conn, table, column, decl):
+    columns = {row[1] for row in conn.execute(f"PRAGMA table_info({table})")}
+    if column not in columns:
+        conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {decl}")
+
+
+def reset_output(out_dir, rebuild, resume, storage="compact"):
     db_path = out_dir / "gmail_index.sqlite"
     messages_dir = out_dir / "messages"
+    blobs_dir = out_dir / "blobs"
     if db_path.exists() and not rebuild and not resume:
         raise SystemExit(f"Database already exists. Use --rebuild to replace or --resume to continue: {db_path}")
     if rebuild:
@@ -222,7 +244,12 @@ def reset_output(out_dir, rebuild, resume):
                 candidate.unlink()
         if messages_dir.exists():
             remove_tree(messages_dir)
-    messages_dir.mkdir(parents=True, exist_ok=True)
+        if storage == "compact" and blobs_dir.exists():
+            remove_tree(blobs_dir)
+    if storage == "legacy":
+        messages_dir.mkdir(parents=True, exist_ok=True)
+    else:
+        blobs_dir.mkdir(parents=True, exist_ok=True)
     return db_path
 
 
@@ -295,14 +322,26 @@ def validate_import(conn, out_dir):
     }
 
 
-def insert_message(conn, index, raw_bytes, from_line, out_dir):
+def attachment_blob_path(out_dir, payload):
+    sha = hashlib.sha256(payload).hexdigest()
+    rel = Path("blobs") / sha[:2] / sha[2:4] / f"{sha}.blob"
+    target = out_dir / rel
+    target.parent.mkdir(parents=True, exist_ok=True)
+    if not target.exists():
+        target.write_bytes(payload)
+    return rel.as_posix(), sha
+
+
+def insert_message(conn, index, raw_bytes, from_line, out_dir, storage="compact", mbox_path="", mbox_offset=None, mbox_length=None):
     msg = BytesParser(policy=policy.default).parsebytes(raw_bytes)
     message_dir = out_dir / "messages" / f"{index:06d}"
     attachment_dir = message_dir / "attachments"
-    attachment_dir.mkdir(parents=True, exist_ok=True)
-
-    raw_path = message_dir / "raw.eml"
-    raw_path.write_bytes(raw_bytes)
+    if storage == "legacy":
+        attachment_dir.mkdir(parents=True, exist_ok=True)
+        raw_path = message_dir / "raw.eml"
+        raw_path.write_bytes(raw_bytes)
+    else:
+        raw_path = None
 
     text_parts = []
     html_parts = []
@@ -318,6 +357,7 @@ def insert_message(conn, index, raw_bytes, from_line, out_dir):
 
         if is_attachment:
             payload = part_payload(part)
+            rel_blob_path, sha = attachment_blob_path(out_dir, payload)
             if not filename:
                 ext = content_type.split("/", 1)[-1] if "/" in content_type else "bin"
                 filename = f"attachment-{len(attachments) + 1}.{ext}"
@@ -326,11 +366,15 @@ def insert_message(conn, index, raw_bytes, from_line, out_dir):
                 ext = content_type.split("/", 1)[1].split(";", 1)[0]
                 safe = f"{safe}.{'jpg' if ext == 'jpeg' else ext}"
             safe = safe_name(safe, f"attachment-{len(attachments) + 1}.bin")
-            target = attachment_dir / safe
-            if target.exists():
-                target.unlink()
-            target.write_bytes(payload)
-            attachments.append((filename, target.relative_to(out_dir).as_posix(), content_type, len(payload)))
+            if storage == "legacy":
+                target = attachment_dir / safe
+                if target.exists():
+                    target.unlink()
+                target.write_bytes(payload)
+                rel_path = target.relative_to(out_dir).as_posix()
+            else:
+                rel_path = rel_blob_path
+            attachments.append((filename, rel_path, content_type, len(payload), sha))
             continue
 
         if content_type == "text/plain":
@@ -345,8 +389,17 @@ def insert_message(conn, index, raw_bytes, from_line, out_dir):
     if not body_html and body_text:
         body_html = f"<pre>{html.escape(body_text)}</pre>"
 
-    body_path = message_dir / "body.html"
-    body_path.write_text(body_html or "<em>No displayable body.</em>", encoding="utf-8")
+    display_body_html = body_html or "<em>No displayable body.</em>"
+    if storage == "legacy":
+        body_path = message_dir / "body.html"
+        body_path.write_text(display_body_html, encoding="utf-8")
+        body_html_path = body_path.relative_to(out_dir).as_posix()
+        raw_eml_path = raw_path.relative_to(out_dir).as_posix()
+        stored_body_html = None
+    else:
+        body_html_path = ""
+        raw_eml_path = ""
+        stored_body_html = display_body_html
 
     date, year = parse_date(msg.get("Date"))
     from_name, from_email, from_domain, from_display = parse_from(msg.get("From"))
@@ -360,16 +413,16 @@ def insert_message(conn, index, raw_bytes, from_line, out_dir):
         """
         INSERT INTO messages
         (id,date,year,from_name,from_email,from_domain,from_display,to_text,subject,labels,
-         message_id,size_bytes,size_mb,preview,body_text,body_html_path,raw_eml_path,mbox_from_line,
-         in_reply_to,references_text,thread_key)
-        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+         message_id,size_bytes,size_mb,preview,body_text,body_html,body_html_path,raw_eml_path,
+         mbox_path,mbox_offset,mbox_length,storage_mode,mbox_from_line,in_reply_to,references_text,thread_key)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
         """,
         (
             index, date, year, from_name, from_email, from_domain, from_display,
             to_text, subject, labels, clean(msg.get("Message-ID")),
-            len(raw_bytes), size_mb, preview, body_text,
-            body_path.relative_to(out_dir).as_posix(),
-            raw_path.relative_to(out_dir).as_posix(),
+            len(raw_bytes), size_mb, preview, body_text, stored_body_html,
+            body_html_path, raw_eml_path,
+            str(mbox_path) if mbox_path else "", mbox_offset, mbox_length, storage,
             from_line.decode("utf-8", errors="replace").strip(),
             clean(msg.get("In-Reply-To")),
             clean(msg.get("References")),
@@ -394,14 +447,14 @@ def insert_message(conn, index, raw_bytes, from_line, out_dir):
             "INSERT OR IGNORE INTO message_users(email, message_id) VALUES (?, ?)",
             (email, index),
         )
-    for filename, path, content_type, size in attachments:
+    for filename, path, content_type, size, sha in attachments:
         conn.execute(
             """
             INSERT INTO attachments
-            (message_id,filename,path,content_type,size_bytes,size_mb)
-            VALUES (?,?,?,?,?,?)
+            (message_id,filename,path,content_type,size_bytes,size_mb,sha256)
+            VALUES (?,?,?,?,?,?,?)
             """,
-            (index, filename, path, content_type, size, round(size / 1024 / 1024, 3)),
+            (index, filename, path, content_type, size, round(size / 1024 / 1024, 3), sha),
         )
 
 
@@ -415,7 +468,11 @@ def main():
     parser.add_argument("--commit-every", type=int, default=500)
     parser.add_argument("--progress", type=int, default=1000)
     parser.add_argument("--only-indexes", default="", help="Comma-separated 1-based MBOX message indexes to import or repair.")
+    parser.add_argument("--storage", choices=("compact", "legacy"), default="compact", help="compact stores body HTML in SQLite and deduplicated attachments in blobs/ (default); legacy writes messages/<id>/ files.")
+    parser.add_argument("--legacy", action="store_true", help="Shortcut for --storage legacy.")
     args = parser.parse_args()
+    if args.legacy:
+        args.storage = "legacy"
 
     if args.rebuild and args.resume:
         raise SystemExit("Use only one of --rebuild or --resume.")
@@ -423,7 +480,7 @@ def main():
         raise SystemExit(f"MBOX not found: {args.mbox}")
 
     args.out_dir.mkdir(parents=True, exist_ok=True)
-    db_path = reset_output(args.out_dir, args.rebuild, args.resume)
+    db_path = reset_output(args.out_dir, args.rebuild, args.resume, args.storage)
     reports_dir = args.out_dir / "reports"
     error_log = reports_dir / "import_errors.jsonl"
     summary_path = reports_dir / "import_summary.json"
@@ -442,14 +499,18 @@ def main():
     last_bytes = 0
 
     try:
-        for index, raw, from_line, bytes_seen in iter_mbox_messages(args.mbox, args.limit, skip_through, only_indexes or None):
+        for index, raw, from_line, mbox_offset, mbox_length in iter_mbox_messages(args.mbox, args.limit, skip_through, only_indexes or None):
             seen = index
-            last_bytes = bytes_seen
+            last_bytes = (mbox_offset or 0) + (mbox_length or 0)
             if conn.execute("SELECT 1 FROM messages WHERE id = ?", (index,)).fetchone():
                 continue
             conn.execute("SAVEPOINT message_import")
             try:
-                insert_message(conn, index, raw, from_line, args.out_dir)
+                insert_message(
+                    conn, index, raw, from_line, args.out_dir,
+                    storage=args.storage, mbox_path=args.mbox,
+                    mbox_offset=mbox_offset, mbox_length=mbox_length,
+                )
                 conn.execute("RELEASE SAVEPOINT message_import")
                 imported += 1
             except Exception as exc:
@@ -472,7 +533,7 @@ def main():
             if args.progress and (index % args.progress == 0):
                 elapsed = max(time.time() - started, 0.001)
                 rate = imported / elapsed
-                pct = (bytes_seen / mbox_size * 100) if mbox_size else 0
+                pct = (last_bytes / mbox_size * 100) if mbox_size else 0
                 print(
                     f"seen={index} imported={imported} failed={failed} "
                     f"mbox={pct:.1f}% rate={rate:.1f}/s",
@@ -486,6 +547,7 @@ def main():
             "out_dir": str(args.out_dir),
             "db": str(db_path),
             "mode": "rebuild" if args.rebuild else "resume" if args.resume else "new",
+            "storage": args.storage,
             "limit": args.limit,
             "started_at": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(started)),
             "finished_at": time.strftime("%Y-%m-%d %H:%M:%S"),

@@ -111,6 +111,12 @@ def ensure_performance_schema():
             CREATE INDEX IF NOT EXISTS idx_conversation_labels_label_date ON conversation_labels(label, latest_date);
             """
         )
+        ensure_column(conn, "messages", "body_html", "TEXT")
+        ensure_column(conn, "messages", "mbox_path", "TEXT")
+        ensure_column(conn, "messages", "mbox_offset", "INTEGER")
+        ensure_column(conn, "messages", "mbox_length", "INTEGER")
+        ensure_column(conn, "messages", "storage_mode", "TEXT")
+        ensure_column(conn, "attachments", "sha256", "TEXT")
         indexed = conn.execute("SELECT count(DISTINCT message_id) FROM message_labels").fetchone()[0]
         expected = conn.execute("SELECT count(*) FROM messages WHERE labels <> ''").fetchone()[0]
         if indexed != expected:
@@ -165,6 +171,12 @@ def ensure_performance_schema():
         if indexed_conversations != expected_conversations or indexed_label_conversations != expected_label_conversations:
             rebuild_conversation_indexes(conn)
         conn.execute("PRAGMA optimize")
+
+
+def ensure_column(conn, table, column, decl):
+    columns = {row[1] for row in conn.execute(f"PRAGMA table_info({table})")}
+    if column not in columns:
+        conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {decl}")
 
 
 def rebuild_conversation_indexes(conn):
@@ -614,6 +626,7 @@ def message_detail(message_id):
     message = one_sql("SELECT * FROM messages WHERE id = ?", (message_id,))
     if not message:
         return None
+    message["body_url"] = body_url(message)
     message["attachments"] = read_sql(
         "SELECT filename,path,content_type,size_mb,size_bytes FROM attachments WHERE message_id = ? ORDER BY id",
         (message_id,),
@@ -633,6 +646,7 @@ def conversation_detail(conversation_id):
     if not rows:
         return None
     for row in rows:
+        row["body_url"] = body_url(row)
         row["attachments"] = read_sql(
             "SELECT filename,path,content_type,size_mb,size_bytes FROM attachments WHERE message_id = ? ORDER BY id",
             (row["id"],),
@@ -643,6 +657,27 @@ def conversation_detail(conversation_id):
         "message_count": len(rows),
         "messages": rows,
     }
+
+
+def body_url(message):
+    path = message.get("body_html_path") or ""
+    if path:
+        return "/file/" + quote(path, safe="/")
+    return f"/body/{message['id']}"
+
+
+def message_body_html(message_id):
+    message = one_sql("SELECT id, body_html, body_html_path FROM messages WHERE id = ?", (message_id,))
+    if not message:
+        return None
+    if message.get("body_html"):
+        return rewrite_inline_cids(f"body/{message_id}", message["body_html"])
+    rel = message.get("body_html_path") or ""
+    if rel:
+        target = (DATA_DIR / rel).resolve()
+        if str(target).startswith(str(DATA_DIR)) and target.exists():
+            return rewrite_inline_cids(rel, target.read_text(encoding="utf-8", errors="replace"))
+    return "<em>No displayable body.</em>"
 
 
 def rewrite_inline_cids(rel_path, html_text):
@@ -777,8 +812,8 @@ async function loadList(){const data=await api('/api/conversations?'+query().toS
 function conversationRow(m){return `<div class="row ${m.conversation_id===state.active?'active':''}" data-id="${esc(m.conversation_id)}"><div class="subject">${esc(m.subject||'(no subject)')} ${m.message_count>1?`<span class="small">(${m.message_count})</span>`:''}</div><div class="meta">${esc(m.from_display)} - ${esc(m.latest_date)} - ${m.total_size_mb} MB</div><div class="preview">${esc(m.preview)}</div><div class="chips">${(m.labels||'').split(',').filter(Boolean).slice(0,5).map(l=>`<span class="chip">${esc(l.trim())}</span>`).join('')} ${m.attachment_count?`<span class="chip">${m.attachment_count} attachment(s)</span>`:''}</div></div>`;}
 function resizeFrame(frame){try{const doc=frame.contentDocument||frame.contentWindow.document; const h=Math.max(520, doc.documentElement.scrollHeight, doc.body.scrollHeight); frame.style.height=(h+24)+'px';}catch(e){}}
 function setActiveRow(id){state.active=id; document.querySelectorAll('.row').forEach(r=>r.classList.toggle('active', r.dataset.id===String(id)));}
-async function show(id){setActiveRow(id); $('detail').innerHTML='<div class="empty">Loading message...</div>'; const m=await api('/api/message/'+id); const atts=m.attachments.map(a=>`<a class="att" href="/file/${encodeURIComponent(a.path)}" target="_blank">${esc(a.filename)} - ${a.size_mb} MB</a>`).join(''); $('detail').innerHTML=`<h1>${esc(m.subject||'(no subject)')}</h1><div class="kv"><b>From:</b> ${esc(m.from_display)}</div><div class="kv"><b>To:</b> ${esc(m.to_text)}</div><div class="kv"><b>Date:</b> ${esc(m.date)}</div><div class="kv"><b>Size:</b> ${m.size_mb} MB</div><div class="chips">${(m.labels||'').split(',').filter(Boolean).map(l=>`<span class="chip">${esc(l.trim())}</span>`).join('')}</div>${atts?`<div class="attachments">${atts}</div>`:''}<iframe class="body-frame" sandbox="allow-same-origin" onload="resizeFrame(this)" src="/file/${encodeURIComponent(m.body_html_path)}"></iframe>`;}
-async function showConversation(id){setActiveRow(id); $('detail').innerHTML='<div class="empty">Loading conversation...</div>'; const c=await api('/api/conversation/'+encodeURIComponent(id)); const cards=c.messages.map(m=>{const atts=m.attachments.map(a=>`<a class="att" href="/file/${encodeURIComponent(a.path)}" target="_blank">${esc(a.filename)} - ${a.size_mb} MB</a>`).join(''); return `<section class="message-card"><div class="message-head"><div class="kv"><b>From:</b> ${esc(m.from_display)}</div><div class="kv"><b>To:</b> ${esc(m.to_text)}</div><div class="kv"><b>Date:</b> ${esc(m.date)}</div><div class="kv"><b>Size:</b> ${m.size_mb} MB</div>${atts?`<div class="attachments">${atts}</div>`:''}</div><div class="message-body"><iframe class="body-frame" sandbox="allow-same-origin" onload="resizeFrame(this)" src="/file/${encodeURIComponent(m.body_html_path)}"></iframe></div></section>`;}).join(''); $('detail').innerHTML=`<h1>${esc(c.subject||'(no subject)')}</h1><div class="kv"><b>Conversation:</b> ${c.message_count} message(s)</div>${cards}`;}
+async function show(id){setActiveRow(id); $('detail').innerHTML='<div class="empty">Loading message...</div>'; const m=await api('/api/message/'+id); const atts=m.attachments.map(a=>`<a class="att" href="/file/${encodeURIComponent(a.path)}" target="_blank">${esc(a.filename)} - ${a.size_mb} MB</a>`).join(''); $('detail').innerHTML=`<h1>${esc(m.subject||'(no subject)')}</h1><div class="kv"><b>From:</b> ${esc(m.from_display)}</div><div class="kv"><b>To:</b> ${esc(m.to_text)}</div><div class="kv"><b>Date:</b> ${esc(m.date)}</div><div class="kv"><b>Size:</b> ${m.size_mb} MB</div><div class="chips">${(m.labels||'').split(',').filter(Boolean).map(l=>`<span class="chip">${esc(l.trim())}</span>`).join('')}</div>${atts?`<div class="attachments">${atts}</div>`:''}<iframe class="body-frame" sandbox="allow-same-origin" onload="resizeFrame(this)" src="${esc(m.body_url)}"></iframe>`;}
+async function showConversation(id){setActiveRow(id); $('detail').innerHTML='<div class="empty">Loading conversation...</div>'; const c=await api('/api/conversation/'+encodeURIComponent(id)); const cards=c.messages.map(m=>{const atts=m.attachments.map(a=>`<a class="att" href="/file/${encodeURIComponent(a.path)}" target="_blank">${esc(a.filename)} - ${a.size_mb} MB</a>`).join(''); return `<section class="message-card"><div class="message-head"><div class="kv"><b>From:</b> ${esc(m.from_display)}</div><div class="kv"><b>To:</b> ${esc(m.to_text)}</div><div class="kv"><b>Date:</b> ${esc(m.date)}</div><div class="kv"><b>Size:</b> ${m.size_mb} MB</div>${atts?`<div class="attachments">${atts}</div>`:''}</div><div class="message-body"><iframe class="body-frame" sandbox="allow-same-origin" onload="resizeFrame(this)" src="${esc(m.body_url)}"></iframe></div></section>`;}).join(''); $('detail').innerHTML=`<h1>${esc(c.subject||'(no subject)')}</h1><div class="kv"><b>Conversation:</b> ${c.message_count} message(s)</div>${cards}`;}
 $('q').addEventListener('keydown',e=>{if(e.key==='Enter'){state.q=$('q').value.trim(); state.page=1; loadList();}});
 $('sort').onchange=()=>{state.sort=$('sort').value; state.page=1; loadList();};
 $('dateFrom').onchange=()=>{state.dateFrom=$('dateFrom').value; state.page=1; loadList();}; $('dateTo').onchange=()=>{state.dateTo=$('dateTo').value; state.page=1; loadList();};
@@ -835,6 +870,24 @@ class Handler(BaseHTTPRequestHandler):
             conversation_id = unquote(parsed.path[len("/api/conversation/") :])
             conversation = conversation_detail(conversation_id)
             json_response(self, conversation if conversation else {"error": "not found"}, 200 if conversation else 404)
+            return
+
+        if parsed.path.startswith("/body/"):
+            try:
+                message_id = int(parsed.path.rsplit("/", 1)[-1])
+            except ValueError:
+                self.send_error(404)
+                return
+            html_text = message_body_html(message_id)
+            if html_text is None:
+                self.send_error(404)
+                return
+            data = html_text.encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
             return
 
         if parsed.path.startswith("/file/"):
