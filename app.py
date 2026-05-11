@@ -32,6 +32,23 @@ def load_config():
 
 CONFIG = load_config()
 ACCOUNT_EMAILS = {email.lower() for email in CONFIG.get("account_emails", [])}
+DEFAULT_TOP_USER_EXCLUDE = [
+    "noreply", "no-reply", "donotreply", "do-not-reply", "newsletter",
+    "promo", "marketing", "offers", "rewards", "shop", "notification",
+]
+TOP_USER_INCLUDE_PATTERNS = [pattern.lower() for pattern in CONFIG.get("top_user_include_patterns", [])]
+TOP_USER_EXCLUDE_PATTERNS = [
+    pattern.lower()
+    for pattern in CONFIG.get("top_user_exclude_patterns", DEFAULT_TOP_USER_EXCLUDE)
+]
+
+
+def is_relative_to(path, root):
+    try:
+        path.resolve().relative_to(root.resolve())
+        return True
+    except ValueError:
+        return False
 
 
 def find_port():
@@ -856,17 +873,19 @@ def facets():
         """
     ):
         self_emails.add(row["email"])
-    user_exclusion = ""
+    user_clauses = []
     user_params = []
     if self_emails:
         placeholders = ",".join("?" for _ in self_emails)
-        user_exclusion = f"WHERE email NOT IN ({placeholders})"
-        user_params = sorted(self_emails)
-    user_where = user_exclusion
-    if user_where:
-        user_where += " AND email LIKE '%.edu'"
-    else:
-        user_where = "WHERE email LIKE '%.edu'"
+        user_clauses.append(f"email NOT IN ({placeholders})")
+        user_params.extend(sorted(self_emails))
+    if TOP_USER_INCLUDE_PATTERNS:
+        user_clauses.append("(" + " OR ".join("email LIKE ?" for _ in TOP_USER_INCLUDE_PATTERNS) + ")")
+        user_params.extend(TOP_USER_INCLUDE_PATTERNS)
+    for pattern in TOP_USER_EXCLUDE_PATTERNS:
+        user_clauses.append("email NOT LIKE ?")
+        user_params.append(f"%{pattern}%")
+    user_where = "WHERE " + " AND ".join(user_clauses) if user_clauses else ""
     return {
         "years": read_sql(
             "SELECT year AS name, count(*) AS count FROM messages WHERE year <> '' GROUP BY year ORDER BY year DESC"
@@ -925,7 +944,7 @@ def message_body_html(message_id):
     rel = message.get("body_html_path") or ""
     if rel:
         target = (DATA_DIR / rel).resolve()
-        if str(target).startswith(str(DATA_DIR)) and target.exists():
+        if is_relative_to(target, DATA_DIR) and target.exists():
             return rewrite_inline_cids(rel, target.read_text(encoding="utf-8", errors="replace"))
     return "<em>No displayable body.</em>"
 
@@ -1161,7 +1180,7 @@ class Handler(BaseHTTPRequestHandler):
         if parsed.path.startswith("/file/"):
             rel = unquote(parsed.path[len("/file/") :])
             target = (DATA_DIR / rel).resolve()
-            if not str(target).startswith(str(DATA_DIR)) or not target.exists():
+            if not is_relative_to(target, DATA_DIR) or not target.exists():
                 self.send_error(404)
                 return
             content_type = mimetypes.guess_type(target.name)[0] or "application/octet-stream"

@@ -4,12 +4,32 @@ A local-only viewer for Gmail Takeout MBOX exports. It imports an MBOX into a SQ
 
 The repository contains only application code and documentation. Real mail data, SQLite indexes, attachments, raw `.eml` files, and local config are intentionally ignored by git.
 
+## Project Status
+
+This project is usable for local personal archives and is packaged as an early public release. Treat it as a local desktop tool, not a hosted multi-user webmail service.
+
+Security and privacy notes are in `SECURITY.md`.
+
 ## Requirements
 
 - Python 3.9 or newer
 - No pip packages are required
 
 The app uses only Python standard-library modules.
+
+Optional editable install:
+
+```sh
+python -m pip install -e .
+```
+
+This exposes command-line entry points:
+
+```text
+mail-backup-import
+mail-backup-viewer
+mail-backup-stats
+```
 
 ## Quick Start
 
@@ -31,9 +51,26 @@ Copy-Item config.example.json config.json
 {
   "account_emails": [
     "your-address@example.com"
+  ],
+  "top_user_include_patterns": [
+    "%.edu"
+  ],
+  "top_user_exclude_patterns": [
+    "noreply",
+    "no-reply",
+    "donotreply",
+    "newsletter",
+    "promo",
+    "marketing",
+    "offers",
+    "rewards",
+    "shop",
+    "notification"
   ]
 }
 ```
+
+`account_emails` is used to infer Sent/Received behavior and hide your own addresses from Top users. `top_user_include_patterns` and `top_user_exclude_patterns` are SQLite `LIKE` patterns used to tune the Top users list for your archive. Remove `top_user_include_patterns` or set it to `[]` to show all non-excluded senders/recipients.
 
 3. Import an MBOX. Compact storage is the default: message body HTML is stored in SQLite, raw `.eml` files are not copied per message, MBOX byte offsets are indexed, and attachments are deduplicated into `blobs/aa/bb/<sha256>.blob`:
 
@@ -121,6 +158,12 @@ Cross-platform Python entrypoint:
 python -B start.py
 ```
 
+If installed with `pip install -e .`:
+
+```sh
+mail-backup-viewer
+```
+
 Portable relative launcher entrypoint:
 
 ```sh
@@ -170,12 +213,13 @@ runtime/
 
 - Conversation-based browsing
 - Local search over subject, sender, recipients, labels, preview, and body text
-- Sorting by date, size, sender, or subject, with optional date range filtering
+- Sorting by newest, oldest, or largest, with optional date range filtering
 - Filters for Inbox, Sent, Important, Spam, Trash, year, Gmail label, sender domain, and attachments
-- Top users filter for frequent senders/recipients, excluding your configured account emails and inferred Sent-mail accounts
+- Top users filter for frequent senders/recipients, excluding your configured account emails and optional sender patterns
 - Page jump controls for conversation results
 - Resizable sidebar, conversation list, and message detail columns
-- Indexed label filtering and optimized conversation list queries for larger archives
+- Indexed filters and optimized conversation list queries for larger archives
+- Active filter chips, clearable filter state, and loading feedback while large queries run
 - HTML body display
 - Extracted attachment links
 - Compact storage by default, with legacy `raw.eml` preservation available via `--storage legacy`
@@ -219,6 +263,7 @@ attachments
 message_labels
 conversation_index
 conversation_labels
+conversation_filters
 message_users
 messages_fts
 ```
@@ -242,7 +287,7 @@ messages/000001/raw.eml
 
 Legacy mode keeps the database smaller and makes attachments easy to inspect per message, but it creates many files.
 
-The app automatically creates or refreshes derived performance tables such as `message_labels`, `conversation_index`, `conversation_labels`, and `message_users` when opening an existing database. The first launch after an import may spend a short time building these indexes; later label, All Mail, and Top Users lists should be much faster. Plain keyword searches use SQLite FTS; Gmail-like operator searches use the local SQL subset described above.
+The app automatically creates or refreshes derived performance tables such as `message_labels`, `conversation_index`, `conversation_labels`, `conversation_filters`, and `message_users` when opening an existing database. The first launch after an import may spend time building these indexes; later All Mail, label, year, domain, and Top users lists should be much faster. Plain keyword searches use SQLite FTS; Gmail-like operator searches use the local SQL subset described above.
 
 ## Conversations
 

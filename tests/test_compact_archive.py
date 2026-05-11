@@ -93,6 +93,10 @@ class CompactArchiveTests(unittest.TestCase):
                     resp = http_conn.getresponse()
                     self.assertEqual(resp.status, 200)
                     self.assertEqual(resp.read(), b"attachment bytes")
+                    http_conn.request("GET", "/file/../sample.mbox")
+                    resp = http_conn.getresponse()
+                    self.assertEqual(resp.status, 404)
+                    resp.read()
                 finally:
                     http_conn.close()
             finally:

@@ -1,0 +1,34 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "mail-backup-local-viewer"
+version = "0.1.0"
+description = "Local-only Gmail Takeout MBOX importer and browser UI"
+readme = "README.md"
+requires-python = ">=3.9"
+license = { file = "LICENSE" }
+authors = [
+  { name = "Mail Backup Local Viewer contributors" }
+]
+keywords = ["gmail", "takeout", "mbox", "sqlite", "email", "archive"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Environment :: Web Environment",
+  "Intended Audience :: End Users/Desktop",
+  "License :: OSI Approved :: MIT License",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3 :: Only",
+  "Topic :: Communications :: Email",
+  "Topic :: Database",
+]
+dependencies = []
+
+[project.scripts]
+mail-backup-viewer = "app:main"
+mail-backup-import = "import_mbox:main"
+mail-backup-stats = "analyze_mbox_stats:main"
+
+[tool.setuptools]
+py-modules = ["app", "import_mbox", "analyze_mbox_stats", "start"]

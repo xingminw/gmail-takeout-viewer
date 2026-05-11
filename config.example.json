@@ -1,5 +1,20 @@
 {
   "account_emails": [
     "your-address@example.com"
+  ],
+  "top_user_include_patterns": [
+    "%.edu"
+  ],
+  "top_user_exclude_patterns": [
+    "noreply",
+    "no-reply",
+    "donotreply",
+    "newsletter",
+    "promo",
+    "marketing",
+    "offers",
+    "rewards",
+    "shop",
+    "notification"
   ]
 }
