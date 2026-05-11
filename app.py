@@ -40,10 +40,20 @@ def find_port():
         return sock.getsockname()[1]
 
 
-def db():
-    conn = sqlite3.connect(DB_PATH)
+READONLY_DB = False
+
+
+def connect_db(readonly=False):
+    if readonly or READONLY_DB:
+        conn = sqlite3.connect(f"file:{DB_PATH}?mode=ro&immutable=1", uri=True)
+    else:
+        conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
     return conn
+
+
+def db():
+    return connect_db()
 
 
 def json_response(handler, payload, status=200):
@@ -56,22 +66,54 @@ def json_response(handler, payload, status=200):
 
 
 def read_sql(sql, params=()):
-    with db() as conn:
+    conn = db()
+    try:
         return [dict(row) for row in conn.execute(sql, params)]
+    finally:
+        conn.close()
 
 
 def one_sql(sql, params=()):
-    with db() as conn:
+    conn = db()
+    try:
         row = conn.execute(sql, params).fetchone()
         return dict(row) if row else None
+    finally:
+        conn.close()
 
 
 def split_labels(labels):
     return [label.strip() for label in (labels or "").split(",") if label.strip()]
 
 
+def schema_ready_readonly():
+    required = {"messages", "attachments", "message_labels", "message_users", "conversation_index", "conversation_labels", "conversation_filters", "messages_fts"}
+    conn = None
+    try:
+        conn = connect_db(readonly=True)
+        existing = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+        if not required.issubset(existing):
+            return False
+        checks = [
+            "SELECT count(*) FROM messages",
+            "SELECT count(*) FROM conversation_index",
+            "SELECT count(*) FROM conversation_labels",
+            "SELECT count(*) FROM conversation_filters",
+            "SELECT count(*) FROM messages_fts",
+        ]
+        for sql in checks:
+            conn.execute(sql).fetchone()
+        return True
+    except sqlite3.Error:
+        return False
+    finally:
+        if conn is not None:
+            conn.close()
+
+
 def ensure_performance_schema():
-    with sqlite3.connect(DB_PATH) as conn:
+    conn = sqlite3.connect(DB_PATH)
+    try:
         conn.executescript(
             """
             CREATE TABLE IF NOT EXISTS message_labels (
@@ -109,6 +151,19 @@ def ensure_performance_schema():
               PRIMARY KEY(label, conversation_id)
             );
             CREATE INDEX IF NOT EXISTS idx_conversation_labels_label_date ON conversation_labels(label, latest_date);
+            CREATE TABLE IF NOT EXISTS conversation_filters (
+              filter_type TEXT NOT NULL,
+              filter_value TEXT NOT NULL,
+              conversation_id TEXT NOT NULL,
+              message_count INTEGER NOT NULL,
+              latest_date TEXT,
+              total_size_bytes INTEGER,
+              latest_message_id INTEGER NOT NULL,
+              attachment_count INTEGER NOT NULL,
+              PRIMARY KEY(filter_type, filter_value, conversation_id)
+            );
+            CREATE INDEX IF NOT EXISTS idx_conversation_filters_value_date ON conversation_filters(filter_type, filter_value, latest_date);
+            CREATE INDEX IF NOT EXISTS idx_conversation_filters_value_size ON conversation_filters(filter_type, filter_value, total_size_bytes);
             """
         )
         ensure_column(conn, "messages", "body_html", "TEXT")
@@ -168,9 +223,40 @@ def ensure_performance_schema():
             """
         ).fetchone()[0]
         indexed_label_conversations = conn.execute("SELECT count(*) FROM conversation_labels").fetchone()[0]
-        if indexed_conversations != expected_conversations or indexed_label_conversations != expected_label_conversations:
+        expected_filter_conversations = conn.execute(
+            """
+            SELECT
+              (SELECT count(*) FROM (
+                SELECT year, COALESCE(NULLIF(thread_key, ''), 'message:' || id) AS conversation_id
+                FROM messages
+                WHERE year <> ''
+                GROUP BY year, conversation_id
+              )) +
+              (SELECT count(*) FROM (
+                SELECT from_domain, COALESCE(NULLIF(thread_key, ''), 'message:' || id) AS conversation_id
+                FROM messages
+                WHERE from_domain <> ''
+                GROUP BY from_domain, conversation_id
+              )) +
+              (SELECT count(*) FROM (
+                SELECT mu.email, COALESCE(NULLIF(m.thread_key, ''), 'message:' || m.id) AS conversation_id
+                FROM message_users mu
+                JOIN messages m ON m.id = mu.message_id
+                GROUP BY mu.email, conversation_id
+              ))
+            """
+        ).fetchone()[0]
+        indexed_filter_conversations = conn.execute("SELECT count(*) FROM conversation_filters").fetchone()[0]
+        if (
+            indexed_conversations != expected_conversations
+            or indexed_label_conversations != expected_label_conversations
+            or indexed_filter_conversations != expected_filter_conversations
+        ):
             rebuild_conversation_indexes(conn)
         conn.execute("PRAGMA optimize")
+        conn.commit()
+    finally:
+        conn.close()
 
 
 def ensure_column(conn, table, column, decl):
@@ -184,6 +270,7 @@ def rebuild_conversation_indexes(conn):
         """
         DELETE FROM conversation_index;
         DELETE FROM conversation_labels;
+        DELETE FROM conversation_filters;
 
         INSERT INTO conversation_index
         (conversation_id,message_count,latest_date,total_size_bytes,latest_message_id,attachment_count)
@@ -238,6 +325,47 @@ def rebuild_conversation_indexes(conn):
                COALESCE(ac.attachment_count, 0)
         FROM ranked r
         LEFT JOIN attachment_counts ac ON ac.label = r.label AND ac.conversation_id = r.conversation_id
+        WHERE r.rn = 1;
+
+        INSERT INTO conversation_filters
+        (filter_type,filter_value,conversation_id,message_count,latest_date,total_size_bytes,latest_message_id,attachment_count)
+        WITH filtered AS (
+          SELECT 'year' AS filter_type, m.year AS filter_value, m.id, m.date, m.size_bytes,
+                 COALESCE(NULLIF(m.thread_key, ''), 'message:' || m.id) AS conversation_id
+          FROM messages m
+          WHERE m.year <> ''
+          UNION ALL
+          SELECT 'domain' AS filter_type, m.from_domain AS filter_value, m.id, m.date, m.size_bytes,
+                 COALESCE(NULLIF(m.thread_key, ''), 'message:' || m.id) AS conversation_id
+          FROM messages m
+          WHERE m.from_domain <> ''
+          UNION ALL
+          SELECT 'user' AS filter_type, mu.email AS filter_value, m.id, m.date, m.size_bytes,
+                 COALESCE(NULLIF(m.thread_key, ''), 'message:' || m.id) AS conversation_id
+          FROM message_users mu
+          JOIN messages m ON m.id = mu.message_id
+        ),
+        ranked AS (
+          SELECT f.*,
+                 count(*) OVER (PARTITION BY filter_type, filter_value, conversation_id) AS message_count,
+                 max(date) OVER (PARTITION BY filter_type, filter_value, conversation_id) AS latest_date,
+                 sum(size_bytes) OVER (PARTITION BY filter_type, filter_value, conversation_id) AS total_size_bytes,
+                 row_number() OVER (PARTITION BY filter_type, filter_value, conversation_id ORDER BY date DESC, id DESC) AS rn
+          FROM filtered f
+        ),
+        attachment_counts AS (
+          SELECT f.filter_type, f.filter_value, f.conversation_id, count(a.id) AS attachment_count
+          FROM filtered f
+          LEFT JOIN attachments a ON a.message_id = f.id
+          GROUP BY f.filter_type, f.filter_value, f.conversation_id
+        )
+        SELECT r.filter_type, r.filter_value, r.conversation_id, r.message_count, r.latest_date,
+               r.total_size_bytes, r.id, COALESCE(ac.attachment_count, 0)
+        FROM ranked r
+        LEFT JOIN attachment_counts ac
+          ON ac.filter_type = r.filter_type
+         AND ac.filter_value = r.filter_value
+         AND ac.conversation_id = r.conversation_id
         WHERE r.rn = 1;
         """
     )
@@ -420,6 +548,14 @@ def build_where(params):
     return where, values
 
 
+MESSAGE_SUMMARY_COLUMNS = """
+    id, date, year, from_name, from_email, from_domain, from_display,
+    to_text, subject, labels, message_id, size_bytes, size_mb, preview,
+    body_html_path, raw_eml_path, mbox_path, mbox_offset, mbox_length,
+    storage_mode, mbox_from_line, in_reply_to, references_text, thread_key
+"""
+
+
 def list_messages(params):
     page = max(int(params.get("page", ["1"])[0] or "1"), 1)
     page_size = min(max(int(params.get("page_size", ["50"])[0] or "50"), 10), 100)
@@ -452,7 +588,7 @@ def list_messages(params):
 
 
 def fast_conversation_filter(params):
-    blocking = ("q", "year", "domain", "user", "date_from", "date_to")
+    blocking = ("q", "date_from", "date_to")
     if any(params.get(key, [""])[0].strip() for key in blocking):
         return None
 
@@ -468,7 +604,22 @@ def fast_conversation_filter(params):
         "important": "Important",
     }
     table = "conversation_index"
-    if label:
+    filter_specs = [
+        ("year", params.get("year", [""])[0].strip()),
+        ("domain", params.get("domain", [""])[0].strip()),
+        ("user", params.get("user", [""])[0].strip().lower()),
+    ]
+    active_filters = [(kind, value) for kind, value in filter_specs if value]
+
+    if len(active_filters) == 1 and not label and not mailbox:
+        filter_type, filter_value = active_filters[0]
+        table = "conversation_filters"
+        clauses.append("c.filter_type = ?")
+        clauses.append("c.filter_value = ?")
+        values.extend([filter_type, filter_value])
+    elif active_filters:
+        return None
+    elif label:
         table = "conversation_labels"
         clauses.append("c.label = ?")
         values.append(label)
@@ -517,7 +668,70 @@ def list_conversations_fast(params, table, clauses, values):
     return {"rows": rows, "page": page, "page_size": page_size, "total": total}
 
 
+def list_conversations_fts_fast(params, match_query):
+    page = max(int(params.get("page", ["1"])[0] or "1"), 1)
+    page_size = min(max(int(params.get("page_size", ["50"])[0] or "50"), 10), 100)
+    offset = (page - 1) * page_size
+    scan_limit = min(max((offset + page_size) * 20, 500), 5000)
+    conn = db()
+    try:
+        hits = conn.execute(
+            """
+            SELECT m.id, m.date,
+                   COALESCE(NULLIF(m.thread_key, ''), 'message:' || m.id) AS conversation_id
+            FROM messages_fts f
+            JOIN messages m ON m.id = f.rowid
+            WHERE messages_fts MATCH ?
+            LIMIT ?
+            """,
+            (match_query, scan_limit),
+        ).fetchall()
+        seen = set()
+        ordered_ids = []
+        for hit in hits:
+            conversation_id = hit["conversation_id"]
+            if conversation_id in seen:
+                continue
+            seen.add(conversation_id)
+            ordered_ids.append(conversation_id)
+        page_ids = ordered_ids[offset : offset + page_size]
+        if not page_ids:
+            rows = []
+        else:
+            placeholders = ",".join("?" for _ in page_ids)
+            row_map = {
+                row["conversation_id"]: dict(row)
+                for row in conn.execute(
+                    f"""
+                    SELECT c.conversation_id, c.message_count, c.latest_date,
+                           round(c.total_size_bytes / 1024.0 / 1024.0, 3) AS total_size_mb,
+                           c.latest_message_id, m.from_display, m.from_email, m.from_domain,
+                           m.subject, m.labels, m.preview, c.attachment_count
+                    FROM conversation_index c
+                    JOIN messages m ON m.id = c.latest_message_id
+                    WHERE c.conversation_id IN ({placeholders})
+                    """,
+                    page_ids,
+                )
+            }
+            rows = [row_map[conversation_id] for conversation_id in page_ids if conversation_id in row_map]
+        total = conn.execute("SELECT count(*) AS n FROM messages_fts WHERE messages_fts MATCH ?", (match_query,)).fetchone()["n"]
+    finally:
+        conn.close()
+    return {"rows": rows, "page": page, "page_size": page_size, "total": total, "total_kind": "matching_messages"}
+
+
 def list_conversations(params):
+    q = params.get("q", [""])[0].strip()
+    simple_search_only = q and ":" not in q and not any(
+        params.get(key, [""])[0].strip()
+        for key in ("year", "domain", "user", "date_from", "date_to", "label", "mailbox", "attachments")
+    )
+    if simple_search_only:
+        match_query = fts_query(q)
+        if match_query:
+            return list_conversations_fts_fast(params, match_query)
+
     fast_filter = fast_conversation_filter(params)
     if fast_filter:
         return list_conversations_fast(params, *fast_filter)
@@ -538,7 +752,8 @@ def list_conversations(params):
     where, values = build_where(params)
     base = f"""
         WITH filtered AS (
-          SELECT m.*,
+          SELECT m.id, m.date, m.size_bytes, m.from_email, m.from_display,
+                 m.from_domain, m.subject, m.labels, m.preview,
                  COALESCE(NULLIF(m.thread_key, ''), 'message:' || m.id) AS conversation_id
           FROM messages m
           {where}
@@ -577,7 +792,7 @@ def list_conversations(params):
     total = one_sql(
         f"""
         WITH filtered AS (
-          SELECT m.*, COALESCE(NULLIF(m.thread_key, ''), 'message:' || m.id) AS conversation_id
+          SELECT m.id, COALESCE(NULLIF(m.thread_key, ''), 'message:' || m.id) AS conversation_id
           FROM messages m
           {where}
         )
@@ -586,6 +801,48 @@ def list_conversations(params):
         values,
     )["n"]
     return {"rows": rows, "page": page, "page_size": page_size, "total": total}
+
+
+def attachments_by_message(message_ids):
+    if not message_ids:
+        return {}
+    placeholders = ",".join("?" for _ in message_ids)
+    grouped = {message_id: [] for message_id in message_ids}
+    rows = read_sql(
+        f"""
+        SELECT message_id, filename, path, content_type, size_mb, size_bytes
+        FROM attachments
+        WHERE message_id IN ({placeholders})
+        ORDER BY message_id, id
+        """,
+        message_ids,
+    )
+    for row in rows:
+        message_id = row.pop("message_id")
+        grouped.setdefault(message_id, []).append(row)
+    return grouped
+
+
+def conversation_message_rows(conversation_id):
+    if conversation_id.startswith("message:") and conversation_id[8:].isdigit():
+        return read_sql(
+            f"""
+            SELECT {MESSAGE_SUMMARY_COLUMNS}
+            FROM messages
+            WHERE id = ?
+            ORDER BY date ASC, id ASC
+            """,
+            (int(conversation_id[8:]),),
+        )
+    return read_sql(
+        f"""
+        SELECT {MESSAGE_SUMMARY_COLUMNS}
+        FROM messages
+        WHERE thread_key = ?
+        ORDER BY date ASC, id ASC
+        """,
+        (conversation_id,),
+    )
 
 
 def facets():
@@ -605,12 +862,17 @@ def facets():
         placeholders = ",".join("?" for _ in self_emails)
         user_exclusion = f"WHERE email NOT IN ({placeholders})"
         user_params = sorted(self_emails)
+    user_where = user_exclusion
+    if user_where:
+        user_where += " AND email LIKE '%.edu'"
+    else:
+        user_where = "WHERE email LIKE '%.edu'"
     return {
         "years": read_sql(
             "SELECT year AS name, count(*) AS count FROM messages WHERE year <> '' GROUP BY year ORDER BY year DESC"
         ),
         "users": read_sql(
-            f"SELECT email AS name, count(*) AS count FROM message_users {user_exclusion} GROUP BY email ORDER BY count DESC LIMIT 40",
+            f"SELECT email AS name, count(*) AS count FROM message_users {user_where} GROUP BY email ORDER BY count DESC LIMIT 40",
             user_params,
         ),
         "domains": read_sql(
@@ -623,34 +885,22 @@ def facets():
 
 
 def message_detail(message_id):
-    message = one_sql("SELECT * FROM messages WHERE id = ?", (message_id,))
+    message = one_sql(f"SELECT {MESSAGE_SUMMARY_COLUMNS} FROM messages WHERE id = ?", (message_id,))
     if not message:
         return None
     message["body_url"] = body_url(message)
-    message["attachments"] = read_sql(
-        "SELECT filename,path,content_type,size_mb,size_bytes FROM attachments WHERE message_id = ? ORDER BY id",
-        (message_id,),
-    )
+    message["attachments"] = attachments_by_message([message_id]).get(message_id, [])
     return message
 
 
 def conversation_detail(conversation_id):
-    rows = read_sql(
-        """
-        SELECT * FROM messages
-        WHERE COALESCE(NULLIF(thread_key, ''), 'message:' || id) = ?
-        ORDER BY date ASC, id ASC
-        """,
-        (conversation_id,),
-    )
+    rows = conversation_message_rows(conversation_id)
     if not rows:
         return None
+    attachments = attachments_by_message([row["id"] for row in rows])
     for row in rows:
         row["body_url"] = body_url(row)
-        row["attachments"] = read_sql(
-            "SELECT filename,path,content_type,size_mb,size_bytes FROM attachments WHERE message_id = ? ORDER BY id",
-            (row["id"],),
-        )
+        row["attachments"] = attachments.get(row["id"], [])
     return {
         "conversation_id": conversation_id,
         "subject": rows[-1].get("subject") or rows[0].get("subject") or "(no subject)",
@@ -746,9 +996,12 @@ aside{border-right:1px solid var(--line);background:#fbfcfd;padding:16px 12px;ov
 .brand{font-size:21px;font-weight:650;margin:4px 10px 4px}.subbrand{font-size:12px;color:var(--muted);margin:0 10px 18px}
 .filter{display:flex;justify-content:space-between;gap:8px;width:100%;border:0;background:transparent;text-align:left;padding:8px 10px;border-radius:18px;cursor:pointer;color:var(--text);font-size:14px}
 .filter:hover,.filter.active{background:var(--accent-bg);color:#174ea6}.group{margin:20px 0 7px 10px;color:var(--muted);font-size:11px;text-transform:uppercase;font-weight:650;letter-spacing:.04em}
-details{margin-top:12px}summary{cursor:pointer;list-style:none;margin:0 0 7px 10px;color:var(--muted);font-size:11px;text-transform:uppercase;font-weight:650;letter-spacing:.04em}summary::-webkit-details-marker{display:none}
+details{margin-top:12px}summary{cursor:pointer;list-style:none;margin:0 0 7px 10px;color:var(--muted);font-size:11px;text-transform:uppercase;font-weight:650;letter-spacing:.04em;display:flex;align-items:center;gap:6px}summary::-webkit-details-marker{display:none}summary::before{content:'>';font-size:12px;color:#8894a1;transition:transform .12s ease}details[open] summary::before{transform:rotate(90deg)}
 .list{border-right:1px solid var(--line);background:var(--panel);display:flex;flex-direction:column;min-width:0;min-height:0;overflow:hidden}
-.toolbar{padding:12px;border-bottom:1px solid var(--line);display:grid;grid-template-columns:1fr 132px 126px 126px;gap:8px;align-items:center}
+.toolbar{padding:12px;border-bottom:1px solid var(--line);display:grid;grid-template-rows:auto auto;gap:9px}
+.search-row{display:grid;grid-template-columns:1fr 104px 92px;gap:8px;align-items:center}.filter-row{display:grid;grid-template-columns:1fr 126px 126px 88px;gap:8px;align-items:center}
+.scope{display:flex;align-items:center;gap:6px;min-width:0;overflow:hidden}.scope-label{font-size:12px;color:var(--muted);white-space:nowrap}.scope-chips{display:flex;gap:6px;min-width:0;overflow:hidden}.scope-chip{background:var(--accent-bg);color:#174ea6;border-radius:14px;padding:5px 9px;font-size:12px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:220px}.loading .messages{opacity:.55}.loading .status-loading{display:inline}.status-loading{display:none;color:var(--accent);font-weight:600}
+.scope-chip button{border:0;background:transparent;color:#174ea6;padding:0 0 0 6px;border-radius:0;font-size:13px;line-height:1}
 input,select,button{border:1px solid var(--line);border-radius:18px;padding:8px 12px;background:#fff;min-width:0;font:inherit}
 input:focus,select:focus{outline:2px solid #c2dbff;border-color:#86b7ff}button{cursor:pointer}
 .messages{overflow-y:auto;min-height:0;flex:1}.pager{padding:10px 12px;border-top:1px solid var(--line);color:var(--muted);font-size:13px;display:flex;justify-content:space-between;align-items:center;gap:8px}
@@ -759,6 +1012,7 @@ input:focus,select:focus{outline:2px solid #c2dbff;border-color:#86b7ff}button{c
 .detail h1{font-size:23px;line-height:1.25;font-weight:560;margin:0 0 16px}.kv{color:var(--muted);font-size:13px;margin:5px 0}.kv b{color:#3c4043;font-weight:600}
 .attachments{margin:18px 0;display:flex;flex-wrap:wrap;gap:8px}.att{border:1px solid var(--line);border-radius:8px;padding:9px 11px;text-decoration:none;color:#202124;background:#fafafa;max-width:340px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .message-card{border:1px solid var(--line);border-radius:8px;margin:16px 0;background:#fff}.message-head{padding:12px 14px;border-bottom:1px solid #edf0f2}.message-body{padding:0 14px 14px}
+.body-toggle{margin:12px 0;border-radius:8px}.message-card.latest .message-body .body-toggle{display:none}
 .att:hover{border-color:#9bbcf3;background:#f4f8ff}.body-frame{width:100%;min-height:520px;border:1px solid var(--line);border-radius:8px;background:#fff;overflow:hidden}.empty{padding:32px;color:var(--muted)}.small{font-size:12px;color:var(--muted)}
 </style>
 </head>
@@ -774,22 +1028,28 @@ input:focus,select:focus{outline:2px solid #c2dbff;border-color:#86b7ff}button{c
     <button class="filter" data-type="mailbox" data-value="spam">Spam</button>
     <button class="filter" data-type="mailbox" data-value="trash">Trash</button>
     <button class="filter" data-type="attachments" data-value="1">Has attachments</button>
-    <details open><summary>Years</summary><div id="years"></div></details>
-    <details open><summary>Labels</summary><div id="labels"></div></details>
+    <details><summary>Years</summary><div id="years"></div></details>
+    <details><summary>Labels</summary><div id="labels"></div></details>
     <details><summary>Top users</summary><div id="users"></div></details>
     <details><summary>Top domains</summary><div id="domains"></div></details>
   </aside>
   <div class="resizer" data-resize="nav" title="Drag to resize sidebar"></div>
   <section class="list">
     <div class="toolbar">
-      <input id="q" placeholder='Search, e.g. from:example.edu subject:review has:attachment older:2025-01-01'>
-      <select id="sort">
-        <option value="date_desc">Newest</option><option value="date_asc">Oldest</option>
-        <option value="size_desc">Largest</option><option value="size_asc">Smallest</option>
-        <option value="sender">Sender</option><option value="subject">Subject</option>
-      </select>
-      <input id="dateFrom" type="date" title="Start date">
-      <input id="dateTo" type="date" title="End date">
+      <div class="search-row">
+        <input id="q" placeholder="Search within current filters">
+        <select id="sort">
+          <option value="date_desc">Newest</option><option value="date_asc">Oldest</option>
+          <option value="size_desc">Largest</option>
+        </select>
+        <button id="searchBtn">Search</button>
+      </div>
+      <div class="filter-row">
+        <div class="scope"><span class="scope-label">Filters</span><div id="scopeChips" class="scope-chips"></div></div>
+        <input id="dateFrom" type="date" title="Start date">
+        <input id="dateTo" type="date" title="End date">
+        <button id="clearFilters">Clear</button>
+      </div>
     </div>
     <div id="messages" class="messages"></div>
     <div class="pager"><button id="prev">Prev</button><div class="page-jump"><span id="status"></span><input id="pageJump" type="number" min="1" value="1" title="Page"></div><button id="next">Next</button></div>
@@ -798,30 +1058,38 @@ input:focus,select:focus{outline:2px solid #c2dbff;border-color:#86b7ff}button{c
   <main id="detail" class="detail"><div class="empty">Select a message.</div></main>
 </div>
 <script>
-let state={page:1,pageSize:50,sort:'date_desc',q:'',dateFrom:'',dateTo:'',filterType:'',filterValue:'',active:null,total:0,pageCount:1};
+let state={page:1,pageSize:50,sort:'date_desc',q:'',dateFrom:'',dateTo:'',filters:{},active:null,total:0,pageCount:1,loading:false,requestId:0};
 const $=id=>document.getElementById(id);
 function esc(s){return String(s||'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));}
 async function api(path){const r=await fetch(path); if(!r.ok) throw new Error(await r.text()); return await r.json();}
-function query(){const p=new URLSearchParams({page:state.page,page_size:state.pageSize,sort:state.sort}); if(state.q)p.set('q',state.q); if(state.dateFrom)p.set('date_from',state.dateFrom); if(state.dateTo)p.set('date_to',state.dateTo); if(state.filterType)p.set(state.filterType,state.filterValue); return p;}
+function query(){const p=new URLSearchParams({page:state.page,page_size:state.pageSize,sort:state.sort}); if(state.q)p.set('q',state.q); if(state.dateFrom)p.set('date_from',state.dateFrom); if(state.dateTo)p.set('date_to',state.dateTo); Object.entries(state.filters).forEach(([k,v])=>{if(v)p.set(k,v);}); return p;}
 async function loadFacets(){const f=await api('/api/facets'); renderFacet('years',f.years,'year'); renderFacet('users',f.users,'user'); renderFacet('domains',f.domains,'domain'); renderFacet('labels',f.labels,'label'); bindFilters();}
 function renderFacet(id,rows,type){const limit=id==='labels'?40:rows.length; const visible=rows.slice(0,limit); const more=rows.length>limit?`<div class="small" style="padding:6px 10px">${rows.length-limit} more hidden</div>`:''; $(id).innerHTML=visible.map(r=>`<button class="filter" data-type="${type}" data-value="${esc(r.name)}"><span>${esc(r.name)}</span><span class="small">${r.count}</span></button>`).join('')+more;}
-function activateFilter(b,load=true){state.filterType=b.dataset.type||''; state.filterValue=b.dataset.value||''; state.page=1; document.querySelectorAll('.filter').forEach(x=>x.classList.toggle('active',x===b)); if(load)loadList();}
+function filterLabel(type,value){const names={mailbox:'Mailbox',label:'Label',year:'Year',user:'User',domain:'Domain',attachments:'Has attachments'}; if(!type)return 'All mail'; return type==='attachments'?'Has attachments':`${names[type]||type}: ${value}`;}
+function chip(label,type){return `<span class="scope-chip">${esc(label)}<button data-clear="${esc(type)}" title="Remove filter">x</button></span>`;}
+function bindChipClears(){document.querySelectorAll('[data-clear]').forEach(b=>b.onclick=()=>{const t=b.dataset.clear; if(t==='q'){state.q=''; $('q').value='';} else if(t==='dateFrom'){state.dateFrom=''; $('dateFrom').value='';} else if(t==='dateTo'){state.dateTo=''; $('dateTo').value='';} else {delete state.filters[t];} state.page=1; renderScope(); loadList('updated filters');});}
+function renderScope(){const chips=[]; Object.entries(state.filters).forEach(([k,v])=>{if(v)chips.push(chip(filterLabel(k,v),k));}); if(state.q)chips.push(chip(`Search: ${state.q}`,'q')); if(state.dateFrom)chips.push(chip(`From ${state.dateFrom}`,'dateFrom')); if(state.dateTo)chips.push(chip(`To ${state.dateTo}`,'dateTo')); $('scopeChips').innerHTML=chips.join('')||'<span class="small">All mail</span>'; bindChipClears(); document.querySelectorAll('.filter').forEach(b=>{const t=b.dataset.type||''; const v=b.dataset.value||''; b.classList.toggle('active',(!t&&!Object.keys(state.filters).length)||(state.filters[t]===v));});}
+function activateFilter(b,load=true){const type=b.dataset.type||''; const value=b.dataset.value||''; state.page=1; state.active=null; if(!type){state.filters={};} else if(type==='attachments'){state.filters.attachments=state.filters.attachments==='1'?'':'1'; if(!state.filters.attachments)delete state.filters.attachments;} else {state.filters[type]=value;} renderScope(); if(load)loadList(filterLabel(type,value));}
 function bindFilters(){document.querySelectorAll('.filter').forEach(b=>b.onclick=()=>activateFilter(b));}
 function activateDefaultFilter(){const b=document.querySelector('.filter[data-type=""][data-value=""]'); if(b)activateFilter(b,false);}
-async function loadList(){const data=await api('/api/conversations?'+query().toString()); state.total=data.total; state.page=data.page; state.pageSize=data.page_size; state.pageCount=Math.max(1,Math.ceil(data.total/data.page_size)); const rows=data.rows; $('messages').innerHTML=rows.map(m=>conversationRow(m)).join('')||'<div class="empty">No messages.</div>'; document.querySelectorAll('.row').forEach(r=>r.onclick=()=>showConversation(r.dataset.id)); const start=data.total?(data.page-1)*data.page_size+1:0; const end=Math.min(data.page*data.page_size,data.total); $('status').textContent=data.total?`${start}-${end} of ${data.total} | Page ${data.page}/${state.pageCount}`:'0 messages'; $('pageJump').value=data.page; $('pageJump').max=state.pageCount; $('prev').disabled=state.page<=1; $('next').disabled=end>=data.total;}
+async function loadList(reason='conversations'){const requestId=++state.requestId; state.loading=true; document.body.classList.add('loading'); $('messages').innerHTML=`<div class="empty">Loading ${esc(reason)}...</div>`; $('status').innerHTML='<span class="status-loading">Loading...</span>'; $('prev').disabled=true; $('next').disabled=true; renderScope(); try{const data=await api('/api/conversations?'+query().toString()); if(requestId!==state.requestId)return; state.total=data.total; state.page=data.page; state.pageSize=data.page_size; state.pageCount=Math.max(1,Math.ceil(data.total/data.page_size)); const rows=data.rows; $('messages').innerHTML=rows.map(m=>conversationRow(m)).join('')||'<div class="empty">No messages.</div>'; document.querySelectorAll('.row').forEach(r=>r.onclick=()=>showConversation(r.dataset.id)); const start=data.total?(data.page-1)*data.page_size+1:0; const end=Math.min(data.page*data.page_size,data.total); $('status').textContent=data.total?`${start}-${end} of ${data.total} | Page ${data.page}/${state.pageCount}`:'0 messages'; $('pageJump').value=data.page; $('pageJump').max=state.pageCount; $('prev').disabled=state.page<=1; $('next').disabled=end>=data.total;}catch(e){if(requestId===state.requestId){$('messages').innerHTML=`<div class="empty">Load failed: ${esc(e.message)}</div>`; $('status').textContent='Load failed';}}finally{if(requestId===state.requestId){state.loading=false; document.body.classList.remove('loading');}}}
 function conversationRow(m){return `<div class="row ${m.conversation_id===state.active?'active':''}" data-id="${esc(m.conversation_id)}"><div class="subject">${esc(m.subject||'(no subject)')} ${m.message_count>1?`<span class="small">(${m.message_count})</span>`:''}</div><div class="meta">${esc(m.from_display)} - ${esc(m.latest_date)} - ${m.total_size_mb} MB</div><div class="preview">${esc(m.preview)}</div><div class="chips">${(m.labels||'').split(',').filter(Boolean).slice(0,5).map(l=>`<span class="chip">${esc(l.trim())}</span>`).join('')} ${m.attachment_count?`<span class="chip">${m.attachment_count} attachment(s)</span>`:''}</div></div>`;}
 function resizeFrame(frame){try{const doc=frame.contentDocument||frame.contentWindow.document; const h=Math.max(520, doc.documentElement.scrollHeight, doc.body.scrollHeight); frame.style.height=(h+24)+'px';}catch(e){}}
 function setActiveRow(id){state.active=id; document.querySelectorAll('.row').forEach(r=>r.classList.toggle('active', r.dataset.id===String(id)));}
 async function show(id){setActiveRow(id); $('detail').innerHTML='<div class="empty">Loading message...</div>'; const m=await api('/api/message/'+id); const atts=m.attachments.map(a=>`<a class="att" href="/file/${encodeURIComponent(a.path)}" target="_blank">${esc(a.filename)} - ${a.size_mb} MB</a>`).join(''); $('detail').innerHTML=`<h1>${esc(m.subject||'(no subject)')}</h1><div class="kv"><b>From:</b> ${esc(m.from_display)}</div><div class="kv"><b>To:</b> ${esc(m.to_text)}</div><div class="kv"><b>Date:</b> ${esc(m.date)}</div><div class="kv"><b>Size:</b> ${m.size_mb} MB</div><div class="chips">${(m.labels||'').split(',').filter(Boolean).map(l=>`<span class="chip">${esc(l.trim())}</span>`).join('')}</div>${atts?`<div class="attachments">${atts}</div>`:''}<iframe class="body-frame" sandbox="allow-same-origin" onload="resizeFrame(this)" src="${esc(m.body_url)}"></iframe>`;}
-async function showConversation(id){setActiveRow(id); $('detail').innerHTML='<div class="empty">Loading conversation...</div>'; const c=await api('/api/conversation/'+encodeURIComponent(id)); const cards=c.messages.map(m=>{const atts=m.attachments.map(a=>`<a class="att" href="/file/${encodeURIComponent(a.path)}" target="_blank">${esc(a.filename)} - ${a.size_mb} MB</a>`).join(''); return `<section class="message-card"><div class="message-head"><div class="kv"><b>From:</b> ${esc(m.from_display)}</div><div class="kv"><b>To:</b> ${esc(m.to_text)}</div><div class="kv"><b>Date:</b> ${esc(m.date)}</div><div class="kv"><b>Size:</b> ${m.size_mb} MB</div>${atts?`<div class="attachments">${atts}</div>`:''}</div><div class="message-body"><iframe class="body-frame" sandbox="allow-same-origin" onload="resizeFrame(this)" src="${esc(m.body_url)}"></iframe></div></section>`;}).join(''); $('detail').innerHTML=`<h1>${esc(c.subject||'(no subject)')}</h1><div class="kv"><b>Conversation:</b> ${c.message_count} message(s)</div>${cards}`;}
-$('q').addEventListener('keydown',e=>{if(e.key==='Enter'){state.q=$('q').value.trim(); state.page=1; loadList();}});
-$('sort').onchange=()=>{state.sort=$('sort').value; state.page=1; loadList();};
-$('dateFrom').onchange=()=>{state.dateFrom=$('dateFrom').value; state.page=1; loadList();}; $('dateTo').onchange=()=>{state.dateTo=$('dateTo').value; state.page=1; loadList();};
-$('pageJump').addEventListener('keydown',e=>{if(e.key==='Enter'){const page=Math.min(Math.max(parseInt($('pageJump').value||'1',10),1),state.pageCount); state.page=page; loadList();}});
-$('pageJump').addEventListener('change',()=>{const page=Math.min(Math.max(parseInt($('pageJump').value||'1',10),1),state.pageCount); state.page=page; loadList();});
-$('prev').onclick=()=>{if(state.page>1){state.page--;loadList();}}; $('next').onclick=()=>{if(state.page<state.pageCount){state.page++;loadList();}};
+function bodySlot(m,open){return open?`<iframe class="body-frame" sandbox="allow-same-origin" onload="resizeFrame(this)" src="${esc(m.body_url)}"></iframe>`:`<button class="body-toggle" data-body-url="${esc(m.body_url)}">Open body</button>`;}
+function bindBodyToggles(){document.querySelectorAll('.body-toggle').forEach(b=>b.onclick=()=>{b.outerHTML=`<iframe class="body-frame" sandbox="allow-same-origin" onload="resizeFrame(this)" src="${esc(b.dataset.bodyUrl)}"></iframe>`;});}
+async function showConversation(id){setActiveRow(id); $('detail').innerHTML='<div class="empty">Loading conversation...</div>'; const c=await api('/api/conversation/'+encodeURIComponent(id)); const lastIndex=c.messages.length-1; const cards=c.messages.map((m,i)=>{const atts=m.attachments.map(a=>`<a class="att" href="/file/${encodeURIComponent(a.path)}" target="_blank">${esc(a.filename)} - ${a.size_mb} MB</a>`).join(''); return `<section class="message-card ${i===lastIndex?'latest':''}"><div class="message-head"><div class="kv"><b>From:</b> ${esc(m.from_display)}</div><div class="kv"><b>To:</b> ${esc(m.to_text)}</div><div class="kv"><b>Date:</b> ${esc(m.date)}</div><div class="kv"><b>Size:</b> ${m.size_mb} MB</div>${atts?`<div class="attachments">${atts}</div>`:''}</div><div class="message-body">${bodySlot(m,i===lastIndex)}</div></section>`;}).join(''); $('detail').innerHTML=`<h1>${esc(c.subject||'(no subject)')}</h1><div class="kv"><b>Conversation:</b> ${c.message_count} message(s)</div>${cards}`; bindBodyToggles();}
+$('searchBtn').onclick=()=>{state.q=$('q').value.trim(); state.page=1; loadList(state.q?`search "${state.q}"`:'conversations');};
+$('q').addEventListener('keydown',e=>{if(e.key==='Enter')$('searchBtn').click();});
+$('sort').onchange=()=>{state.sort=$('sort').value; state.page=1; loadList('sorted conversations');};
+$('dateFrom').onchange=()=>{state.dateFrom=$('dateFrom').value; state.page=1; loadList('date filter');}; $('dateTo').onchange=()=>{state.dateTo=$('dateTo').value; state.page=1; loadList('date filter');};
+$('clearFilters').onclick=()=>{state.filters={}; state.q=''; state.dateFrom=''; state.dateTo=''; state.page=1; $('q').value=''; $('dateFrom').value=''; $('dateTo').value=''; renderScope(); loadList('all mail');};
+$('pageJump').addEventListener('keydown',e=>{if(e.key==='Enter'){const page=Math.min(Math.max(parseInt($('pageJump').value||'1',10),1),state.pageCount); state.page=page; loadList('page '+page);}});
+$('pageJump').addEventListener('change',()=>{const page=Math.min(Math.max(parseInt($('pageJump').value||'1',10),1),state.pageCount); state.page=page; loadList('page '+page);});
+$('prev').onclick=()=>{if(state.page>1){state.page--;loadList('previous page');}}; $('next').onclick=()=>{if(state.page<state.pageCount){state.page++;loadList('next page');}};
 function initResizers(){const root=document.documentElement; const savedNav=localStorage.getItem('gmailLocalNavW'); const savedList=localStorage.getItem('gmailLocalListW'); if(savedNav)root.style.setProperty('--nav-w',savedNav+'px'); if(savedList)root.style.setProperty('--list-w',savedList+'px'); document.querySelectorAll('.resizer').forEach(handle=>{handle.addEventListener('pointerdown',e=>{e.preventDefault(); handle.classList.add('dragging'); const type=handle.dataset.resize; const startX=e.clientX; const startNav=parseInt(getComputedStyle(root).getPropertyValue('--nav-w'),10); const startList=parseInt(getComputedStyle(root).getPropertyValue('--list-w'),10); handle.setPointerCapture(e.pointerId); const move=ev=>{if(type==='nav'){const w=Math.min(Math.max(startNav+ev.clientX-startX,180),420); root.style.setProperty('--nav-w',w+'px'); localStorage.setItem('gmailLocalNavW',w);}else{const w=Math.min(Math.max(startList+ev.clientX-startX,360),900); root.style.setProperty('--list-w',w+'px'); localStorage.setItem('gmailLocalListW',w);}}; const up=ev=>{handle.classList.remove('dragging'); handle.releasePointerCapture(ev.pointerId); handle.removeEventListener('pointermove',move); handle.removeEventListener('pointerup',up);}; handle.addEventListener('pointermove',move); handle.addEventListener('pointerup',up);});});}
-async function init(){initResizers(); bindFilters(); activateDefaultFilter(); $('messages').innerHTML='<div class="empty">Loading all mail...</div>'; await loadFacets(); activateDefaultFilter(); await loadList();}
+async function init(){initResizers(); bindFilters(); renderScope(); $('messages').innerHTML='<div class="empty">Loading all mail...</div>'; await loadFacets(); renderScope(); await loadList('all mail');}
 init();
 </script>
 </body></html>"""
@@ -912,9 +1180,20 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def main():
+    global READONLY_DB
     if not DB_PATH.exists():
         raise SystemExit(f"Missing database: {DB_PATH}")
-    ensure_performance_schema()
+    if os.environ.get("GMAIL_VIEWER_READONLY", "").strip() == "1":
+        READONLY_DB = True
+        print("Using read-only immutable SQLite mode.")
+    else:
+        try:
+            ensure_performance_schema()
+        except sqlite3.OperationalError as exc:
+            if "disk i/o error" not in str(exc).lower() or not schema_ready_readonly():
+                raise
+            READONLY_DB = True
+            print("SQLite write/open path failed on this drive; using read-only immutable mode.")
     port = int(os.environ.get("GMAIL_VIEWER_PORT") or find_port())
     server = ThreadingHTTPServer((HOST, port), Handler)
     url = f"http://{HOST}:{port}/"
@@ -927,6 +1206,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
-
-

@@ -45,7 +45,8 @@ class CompactArchiveTests(unittest.TestCase):
             db_path = out / "gmail_index.sqlite"
             self.assertTrue(db_path.exists())
 
-            with sqlite3.connect(db_path) as conn:
+            conn = sqlite3.connect(db_path)
+            try:
                 row = conn.execute("SELECT body_html, body_html_path, raw_eml_path, mbox_offset, mbox_length, storage_mode FROM messages WHERE id=1").fetchone()
                 self.assertIsNotNone(row)
                 body_html, body_path, raw_path, offset, length, mode = row
@@ -62,6 +63,8 @@ class CompactArchiveTests(unittest.TestCase):
                 self.assertEqual(size, len(b"attachment bytes"))
                 self.assertTrue((out / rel_path).exists())
                 self.assertIn("blobs", rel_path.replace("\\", "/"))
+            finally:
+                conn.close()
 
             env = os.environ.copy()
             env["GMAIL_VIEWER_DATA_DIR"] = str(out)
@@ -76,22 +79,26 @@ class CompactArchiveTests(unittest.TestCase):
             thread.start()
             try:
                 port = server.server_address[1]
-                conn = http.client.HTTPConnection(app.HOST, port, timeout=5)
-                conn.request("GET", "/api/message/1")
-                resp = conn.getresponse()
-                self.assertEqual(resp.status, 200)
-                self.assertIn(b"Compact archive test", resp.read())
-                conn.request("GET", "/body/1")
-                resp = conn.getresponse()
-                self.assertEqual(resp.status, 200)
-                self.assertIn(b"Hello compact", resp.read())
-                conn.request("GET", "/file/" + rel_path)
-                resp = conn.getresponse()
-                self.assertEqual(resp.status, 200)
-                self.assertEqual(resp.read(), b"attachment bytes")
+                http_conn = http.client.HTTPConnection(app.HOST, port, timeout=5)
+                try:
+                    http_conn.request("GET", "/api/message/1")
+                    resp = http_conn.getresponse()
+                    self.assertEqual(resp.status, 200)
+                    self.assertIn(b"Compact archive test", resp.read())
+                    http_conn.request("GET", "/body/1")
+                    resp = http_conn.getresponse()
+                    self.assertEqual(resp.status, 200)
+                    self.assertIn(b"Hello compact", resp.read())
+                    http_conn.request("GET", "/file/" + rel_path)
+                    resp = http_conn.getresponse()
+                    self.assertEqual(resp.status, 200)
+                    self.assertEqual(resp.read(), b"attachment bytes")
+                finally:
+                    http_conn.close()
             finally:
                 server.shutdown()
                 thread.join(timeout=5)
+                server.server_close()
 
 
 if __name__ == "__main__":
