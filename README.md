@@ -4,6 +4,8 @@ A local-only viewer for Gmail Takeout MBOX exports. It imports an MBOX into a SQ
 
 The repository contains only application code and documentation. Real mail data, SQLite indexes, attachments, raw `.eml` files, and local config are intentionally ignored by git.
 
+![Gmail Takeout Viewer showing a filtered local archive](docs/assets/gmail-takeout-viewer-real-example.png)
+
 ## Project Status
 
 This project is usable for local personal archives and is packaged as an early public release. Treat it as a local desktop tool, not a hosted multi-user webmail service.
