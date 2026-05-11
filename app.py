@@ -1005,7 +1005,7 @@ INDEX_HTML = r"""<!doctype html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Mail Backup Local Viewer</title>
+<title>Gmail Takeout Viewer</title>
 <style>
 :root{--bg:#f4f6f8;--panel:#fff;--line:#d9dee5;--text:#202124;--muted:#67727e;--accent:#0b57d0;--accent-bg:#e8f0fe;--chip:#eef2f6;--nav-w:250px;--list-w:520px}
 *{box-sizing:border-box} html,body{height:100%;overflow:hidden} body{margin:0;font-family:Segoe UI,Arial,sans-serif;color:var(--text);background:var(--bg)}
@@ -1038,7 +1038,7 @@ input:focus,select:focus{outline:2px solid #c2dbff;border-color:#86b7ff}button{c
 <body>
 <div class="app">
   <aside>
-    <div class="brand">Mail Backup</div>
+    <div class="brand">Gmail Takeout Viewer</div>
     <div class="subbrand">Local Gmail archive viewer</div>
     <button class="filter active" data-type="" data-value="">All mail</button>
     <button class="filter" data-type="mailbox" data-value="inbox">Inbox</button>

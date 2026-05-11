@@ -1,6 +1,6 @@
 # Security and Privacy
 
-Mail Backup Local Viewer is designed as a local-only tool for browsing a personal Gmail Takeout MBOX archive.
+Gmail Takeout Viewer is designed as a local-only tool for browsing a personal Gmail Takeout MBOX archive.
 
 ## Local server boundary
 

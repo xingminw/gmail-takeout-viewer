@@ -1,4 +1,4 @@
-# Mail Backup Local Viewer
+# Gmail Takeout Viewer
 
 A local-only viewer for Gmail Takeout MBOX exports. It imports an MBOX into a SQLite index plus local archive files, then serves a Gmail-like browser UI on `127.0.0.1`.
 
@@ -26,9 +26,9 @@ python -m pip install -e .
 This exposes command-line entry points:
 
 ```text
-mail-backup-import
-mail-backup-viewer
-mail-backup-stats
+gmail-takeout-import
+gmail-takeout-viewer
+gmail-takeout-stats
 ```
 
 ## Quick Start
@@ -161,7 +161,7 @@ python -B start.py
 If installed with `pip install -e .`:
 
 ```sh
-mail-backup-viewer
+gmail-takeout-viewer
 ```
 
 Portable relative launcher entrypoint:
