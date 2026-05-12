@@ -1,0 +1,122 @@
+{
+  "mbox": "source/sample_10.mbox",
+  "out_dir": "data",
+  "db": "data/gmail_index.sqlite",
+  "mode": "rebuild",
+  "storage": "compact",
+  "limit": 10,
+  "started_at": "2026-05-12 12:06:30",
+  "finished_at": "2026-05-12 12:06:30",
+  "elapsed_seconds": 0.02,
+  "seen_message_index": 10,
+  "skipped_existing": 0,
+  "imported_this_run": 10,
+  "failed_this_run": 0,
+  "mbox_bytes_seen": 3461,
+  "mbox_size_bytes": 3461,
+  "validation": {
+    "messages": 10,
+    "attachments": 0,
+    "message_labels": 21,
+    "fts_rows": 10,
+    "missing_body_html": [],
+    "missing_body_html_count": 0,
+    "missing_raw_eml": [],
+    "missing_raw_eml_count": 0,
+    "top_labels": [
+      {
+        "label": "Fixture",
+        "count": 10
+      },
+      {
+        "label": "Inbox",
+        "count": 7
+      },
+      {
+        "label": "Important",
+        "count": 1
+      },
+      {
+        "label": "Sent",
+        "count": 1
+      },
+      {
+        "label": "Spam",
+        "count": 1
+      },
+      {
+        "label": "Trash",
+        "count": 1
+      }
+    ],
+    "top_domains": [
+      {
+        "domain": "example.com",
+        "count": 10,
+        "mb": 0.0
+      }
+    ],
+    "largest_messages": [
+      {
+        "id": 3,
+        "subject": "Fixture message 3",
+        "from": "sender3@example.com",
+        "mb": 0.0
+      },
+      {
+        "id": 10,
+        "subject": "Fixture message 10",
+        "from": "sender10@example.com",
+        "mb": 0.0
+      },
+      {
+        "id": 8,
+        "subject": "Fixture message 8",
+        "from": "sender8@example.com",
+        "mb": 0.0
+      },
+      {
+        "id": 9,
+        "subject": "Fixture message 9",
+        "from": "sender9@example.com",
+        "mb": 0.0
+      },
+      {
+        "id": 7,
+        "subject": "Fixture message 7",
+        "from": "sender7@example.com",
+        "mb": 0.0
+      },
+      {
+        "id": 5,
+        "subject": "Fixture message 5",
+        "from": "sender5@example.com",
+        "mb": 0.0
+      },
+      {
+        "id": 4,
+        "subject": "Fixture message 4",
+        "from": "sender4@example.com",
+        "mb": 0.0
+      },
+      {
+        "id": 6,
+        "subject": "Fixture message 6",
+        "from": "sender6@example.com",
+        "mb": 0.0
+      },
+      {
+        "id": 1,
+        "subject": "Fixture message 1",
+        "from": "sender1@example.com",
+        "mb": 0.0
+      },
+      {
+        "id": 2,
+        "subject": "Fixture message 2",
+        "from": "sender2@example.com",
+        "mb": 0.0
+      }
+    ]
+  }
+}

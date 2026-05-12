@@ -5,6 +5,7 @@ config.json
 messages/
 *.mbox
 *.mbox.gz
+!examples/*.mbox
 *.eml
 *.sqlite
 *.sqlite-shm
@@ -31,6 +32,15 @@ build/
 dist/
 *.egg-info/
 .DS_Store
+._*
 Thumbs.db
 .idea/
 .vscode/
+
+# Checked-in fake example input and generated output.
+!examples/sample_10.mbox
+!examples/sample_archive/**
+examples/sample_archive/**/._*
+examples/sample_archive/**/*.sqlite-shm
+examples/sample_archive/**/*.sqlite-wal
+examples/sample_archive/**/.DS_Store

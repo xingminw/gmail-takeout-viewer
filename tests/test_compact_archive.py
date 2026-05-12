@@ -37,7 +37,7 @@ class CompactArchiveTests(unittest.TestCase):
             self.make_mbox(mbox)
 
             result = subprocess.run(
-                [sys.executable, str(REPO / "import_mbox.py"), str(mbox), "--out-dir", str(out), "--rebuild", "--storage", "compact"],
+                [sys.executable, str(REPO / "viewer" / "import_mbox.py"), str(mbox), "--out-dir", str(out), "--rebuild", "--storage", "compact"],
                 cwd=str(REPO), text=True, capture_output=True, timeout=30,
             )
             self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
@@ -69,7 +69,7 @@ class CompactArchiveTests(unittest.TestCase):
             env = os.environ.copy()
             env["GMAIL_VIEWER_DATA_DIR"] = str(out)
             env["GMAIL_VIEWER_PORT"] = "0"
-            sys.path.insert(0, str(REPO))
+            sys.path.insert(0, str(REPO / "viewer"))
             import app
             app.DATA_DIR = out.resolve()
             app.DB_PATH = app.DATA_DIR / "gmail_index.sqlite"

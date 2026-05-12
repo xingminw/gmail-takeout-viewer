@@ -1,6 +1,6 @@
 # Security and Privacy
 
-Gmail Takeout Viewer is designed as a local-only tool for browsing a personal Gmail Takeout MBOX archive.
+Gmail Takeout Archive Builder creates local-only mail archive folders from Gmail Takeout MBOX exports.
 
 ## Local server boundary
 
@@ -8,7 +8,7 @@ The viewer binds to `127.0.0.1` and is intended for use on the same machine. Do 
 
 ## Data handling
 
-The repository should contain only source code and documentation. Mail data, SQLite databases, attachments, raw `.eml` files, reports, exports, runtime folders, and local configuration are ignored by git.
+The repository should contain only source code, documentation, and synthetic examples. Real mail data, private SQLite databases, attachments, raw `.eml` files, reports, exports, runtime folders, and local configuration are ignored by git.
 
 Before publishing a fork or opening an issue, check that no generated archive data has been added:
 

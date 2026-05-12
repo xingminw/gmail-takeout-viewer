@@ -1,3 +1,0 @@
-# This viewer currently uses only the Python standard library.
-# No pip packages are required.
-# Python 3.9 or newer is recommended.

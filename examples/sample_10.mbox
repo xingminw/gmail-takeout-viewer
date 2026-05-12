@@ -1,0 +1,119 @@
+From sender1@example.com Fri Mar 01 10:00:00 2024
+From: Sender One <sender1@example.com>
+To: Archive Owner <owner@example.com>
+Subject: Fixture message 1
+Date: Fri, 01 Mar 2024 10:00:00 +0000
+Message-ID: <fixture-1@example.com>
+X-Gmail-Labels: Inbox,Fixture
+MIME-Version: 1.0
+Content-Type: text/plain; charset="utf-8"
+
+This is fixture body 1.
+
+From sender2@example.com Fri Mar 01 10:01:00 2024
+From: Sender Two <sender2@example.com>
+To: Archive Owner <owner@example.com>
+Subject: Fixture message 2
+Date: Fri, 01 Mar 2024 10:01:00 +0000
+Message-ID: <fixture-2@example.com>
+X-Gmail-Labels: Sent,Fixture
+MIME-Version: 1.0
+Content-Type: text/plain; charset="utf-8"
+
+This is fixture body 2.
+
+From sender3@example.com Fri Mar 01 10:02:00 2024
+From: Sender Three <sender3@example.com>
+To: Archive Owner <owner@example.com>
+Subject: Fixture message 3
+Date: Fri, 01 Mar 2024 10:02:00 +0000
+Message-ID: <fixture-3@example.com>
+X-Gmail-Labels: Inbox,Important,Fixture
+MIME-Version: 1.0
+Content-Type: text/plain; charset="utf-8"
+
+This is fixture body 3.
+
+From sender4@example.com Fri Mar 01 10:03:00 2024
+From: Sender Four <sender4@example.com>
+To: Archive Owner <owner@example.com>
+Subject: Fixture message 4
+Date: Fri, 01 Mar 2024 10:03:00 +0000
+Message-ID: <fixture-4@example.com>
+X-Gmail-Labels: Inbox,Fixture
+MIME-Version: 1.0
+Content-Type: text/plain; charset="utf-8"
+
+This is fixture body 4.
+
+From sender5@example.com Fri Mar 01 10:04:00 2024
+From: Sender Five <sender5@example.com>
+To: Archive Owner <owner@example.com>
+Subject: Fixture message 5
+Date: Fri, 01 Mar 2024 10:04:00 +0000
+Message-ID: <fixture-5@example.com>
+X-Gmail-Labels: Trash,Fixture
+MIME-Version: 1.0
+Content-Type: text/plain; charset="utf-8"
+
+This is fixture body 5.
+
+From sender6@example.com Fri Mar 01 10:05:00 2024
+From: Sender Six <sender6@example.com>
+To: Archive Owner <owner@example.com>
+Subject: Fixture message 6
+Date: Fri, 01 Mar 2024 10:05:00 +0000
+Message-ID: <fixture-6@example.com>
+X-Gmail-Labels: Inbox,Fixture
+MIME-Version: 1.0
+Content-Type: text/plain; charset="utf-8"
+
+This is fixture body 6.
+
+From sender7@example.com Fri Mar 01 10:06:00 2024
+From: Sender Seven <sender7@example.com>
+To: Archive Owner <owner@example.com>
+Subject: Fixture message 7
+Date: Fri, 01 Mar 2024 10:06:00 +0000
+Message-ID: <fixture-7@example.com>
+X-Gmail-Labels: Spam,Fixture
+MIME-Version: 1.0
+Content-Type: text/plain; charset="utf-8"
+
+This is fixture body 7.
+
+From sender8@example.com Fri Mar 01 10:07:00 2024
+From: Sender Eight <sender8@example.com>
+To: Archive Owner <owner@example.com>
+Subject: Fixture message 8
+Date: Fri, 01 Mar 2024 10:07:00 +0000
+Message-ID: <fixture-8@example.com>
+X-Gmail-Labels: Inbox,Fixture
+MIME-Version: 1.0
+Content-Type: text/plain; charset="utf-8"
+
+This is fixture body 8.
+
+From sender9@example.com Fri Mar 01 10:08:00 2024
+From: Sender Nine <sender9@example.com>
+To: Archive Owner <owner@example.com>
+Subject: Fixture message 9
+Date: Fri, 01 Mar 2024 10:08:00 +0000
+Message-ID: <fixture-9@example.com>
+X-Gmail-Labels: Inbox,Fixture
+MIME-Version: 1.0
+Content-Type: text/plain; charset="utf-8"
+
+This is fixture body 9.
+
+From sender10@example.com Fri Mar 01 10:09:00 2024
+From: Sender Ten <sender10@example.com>
+To: Archive Owner <owner@example.com>
+Subject: Fixture message 10
+Date: Fri, 01 Mar 2024 10:09:00 +0000
+Message-ID: <fixture-10@example.com>
+X-Gmail-Labels: Inbox,Fixture
+MIME-Version: 1.0
+Content-Type: text/plain; charset="utf-8"
+
+This is fixture body 10.

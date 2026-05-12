@@ -1,0 +1,5 @@
+db=data/gmail_index.sqlite
+messages=10
+attachments=0
+failed=0
+summary=data/reports/import_summary.json
