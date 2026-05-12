@@ -5,6 +5,8 @@ import re
 import shlex
 import socket
 import sqlite3
+import subprocess
+import sys
 import threading
 import webbrowser
 from email import policy
@@ -80,6 +82,15 @@ def json_response(handler, payload, status=200):
     handler.send_header("Content-Length", str(len(body)))
     handler.end_headers()
     handler.wfile.write(body)
+
+
+def open_browser(url):
+    opened = webbrowser.open(url)
+    if not opened and sys.platform == "darwin":
+        try:
+            subprocess.Popen(["open", url])
+        except OSError:
+            pass
 
 
 def read_sql(sql, params=()):
@@ -1219,7 +1230,7 @@ def main():
     print(f"Gmail Takeout Viewer running at {url}")
     print(f"Data directory: {DATA_DIR}")
     print("Press Ctrl+C to stop.")
-    threading.Timer(0.8, lambda: webbrowser.open(url)).start()
+    threading.Timer(0.8, lambda: open_browser(url)).start()
     server.serve_forever()
 
 

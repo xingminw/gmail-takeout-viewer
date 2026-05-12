@@ -147,8 +147,12 @@ start.command
 如果 macOS 提示文件不可执行，在项目目录运行一次：
 
 ```sh
-chmod +x start.command
+chmod +x start.command portable/launch.command start.sh portable/launch.sh
 ```
+
+如果启动器打开后提示 `Missing database`，说明当前目录还没有 `gmail_index.sqlite`。请先导入 MBOX，或者启动前把 `GMAIL_VIEWER_DATA_DIR` 指向包含 `gmail_index.sqlite` 的数据目录。
+
+macOS 启动器也会自动查找常见 portable 结构，比如 app 目录下的 `gmail_index.sqlite`、`data/gmail_index.sqlite`、`archive/gmail_index.sqlite`，或者同级的 `data/` 目录。
 
 macOS 或 Linux 终端启动：
 

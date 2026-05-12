@@ -147,8 +147,12 @@ start.command
 If macOS says the file is not executable, run this once in Terminal from the project folder:
 
 ```sh
-chmod +x start.command
+chmod +x start.command portable/launch.command start.sh portable/launch.sh
 ```
+
+If the launcher opens and immediately reports `Missing database`, import an MBOX first or start with `GMAIL_VIEWER_DATA_DIR` pointing at a folder that contains `gmail_index.sqlite`.
+
+The macOS launcher also auto-detects common portable layouts such as `gmail_index.sqlite` in the app folder, `data/gmail_index.sqlite`, `archive/gmail_index.sqlite`, or a sibling `data/` folder.
 
 On macOS or Linux from Terminal:
 
