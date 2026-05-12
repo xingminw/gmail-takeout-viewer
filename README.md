@@ -1,5 +1,7 @@
 # Gmail Takeout Viewer
 
+[中文说明](README.zh-CN.md)
+
 A local-only viewer for Gmail Takeout MBOX exports. It imports an MBOX into a SQLite index plus local archive files, then serves a Gmail-like browser UI on `127.0.0.1`.
 
 The repository contains only application code and documentation. Real mail data, SQLite indexes, attachments, raw `.eml` files, and local config are intentionally ignored by git.

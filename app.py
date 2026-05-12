@@ -1216,7 +1216,7 @@ def main():
     port = int(os.environ.get("GMAIL_VIEWER_PORT") or find_port())
     server = ThreadingHTTPServer((HOST, port), Handler)
     url = f"http://{HOST}:{port}/"
-    print(f"Mail Backup Local Viewer running at {url}")
+    print(f"Gmail Takeout Viewer running at {url}")
     print(f"Data directory: {DATA_DIR}")
     print("Press Ctrl+C to stop.")
     threading.Timer(0.8, lambda: webbrowser.open(url)).start()
